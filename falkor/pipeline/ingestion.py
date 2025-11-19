@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Callable
 
 from falkor.graph import Neo4jClient, GraphSchema
 from falkor.parsers import CodeParser, PythonParser
-from falkor.models import Entity, Relationship
+from falkor.models import Entity, Relationship, SecretsPolicy
 from falkor.logging_config import get_logger, LogContext, log_operation
 
 logger = get_logger(__name__)
@@ -31,7 +31,8 @@ class IngestionPipeline:
         neo4j_client: Neo4jClient,
         follow_symlinks: bool = DEFAULT_FOLLOW_SYMLINKS,
         max_file_size_mb: float = MAX_FILE_SIZE_MB,
-        batch_size: int = DEFAULT_BATCH_SIZE
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        secrets_policy: SecretsPolicy = SecretsPolicy.REDACT
     ):
         """Initialize ingestion pipeline with security validation.
 
@@ -41,6 +42,7 @@ class IngestionPipeline:
             follow_symlinks: Whether to follow symbolic links (default: False for security)
             max_file_size_mb: Maximum file size in MB to process (default: 10MB)
             batch_size: Number of entities to batch before loading to graph (default: 100)
+            secrets_policy: Policy for handling detected secrets (default: REDACT)
 
         Raises:
             ValueError: If repository path is invalid
@@ -65,12 +67,13 @@ class IngestionPipeline:
         self.follow_symlinks = follow_symlinks
         self.max_file_size_mb = max_file_size_mb
         self.batch_size = batch_size
+        self.secrets_policy = secrets_policy
 
         # Track skipped files for reporting
         self.skipped_files: List[Dict[str, str]] = []
 
-        # Register default parsers
-        self.register_parser("python", PythonParser())
+        # Register default parsers with secrets policy
+        self.register_parser("python", PythonParser(secrets_policy=secrets_policy))
 
     def _validate_repo_path(self) -> None:
         """Validate repository path for security.

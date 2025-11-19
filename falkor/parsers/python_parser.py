@@ -17,16 +17,25 @@ from falkor.models import (
     Relationship,
     NodeType,
     RelationshipType,
+    SecretsPolicy,
 )
+from falkor.security import SecretsScanner
+from falkor.security.secrets_scanner import apply_secrets_policy
 
 
 class PythonParser(CodeParser):
     """Parser for Python source files."""
 
-    def __init__(self) -> None:
-        """Initialize Python parser."""
+    def __init__(self, secrets_policy: SecretsPolicy = SecretsPolicy.REDACT) -> None:
+        """Initialize Python parser.
+
+        Args:
+            secrets_policy: Policy for handling detected secrets (default: REDACT)
+        """
         self.file_entity: Optional[FileEntity] = None
         self.entity_map: Dict[str, str] = {}  # qualified_name -> entity_id
+        self.secrets_policy = secrets_policy
+        self.secrets_scanner = SecretsScanner() if secrets_policy != SecretsPolicy.WARN else None
 
     def parse(self, file_path: str) -> ast.AST:
         """Parse Python file into AST.
@@ -40,6 +49,34 @@ class PythonParser(CodeParser):
         with open(file_path, "r", encoding="utf-8") as f:
             source = f.read()
             return ast.parse(source, filename=file_path)
+
+    def _scan_and_redact_text(self, text: Optional[str], context: str, line_number: int) -> Optional[str]:
+        """Scan text for secrets and apply policy.
+
+        Args:
+            text: Text to scan (docstring, comment, etc.)
+            context: Context for logging (e.g., "file.py")
+            line_number: Line number where text appears
+
+        Returns:
+            Redacted text, or None if should skip this entity
+
+        Raises:
+            ValueError: If policy is FAIL and secrets were found
+        """
+        if not text or not self.secrets_scanner:
+            return text
+
+        # Scan the text
+        scan_result = self.secrets_scanner.scan_string(
+            text,
+            context=f"{context}:{line_number}",
+            filename=context,
+            line_offset=line_number
+        )
+
+        # Apply policy
+        return apply_secrets_policy(scan_result, self.secrets_policy, context)
 
     def extract_entities(self, tree: ast.AST, file_path: str) -> List[Entity]:
         """Extract entities from Python AST.
@@ -257,6 +294,10 @@ class PythonParser(CodeParser):
         qualified_name = f"{file_path}::{node.name}:{node.lineno}"
         docstring = ast.get_docstring(node)
 
+        # Scan docstring for secrets
+        if docstring:
+            docstring = self._scan_and_redact_text(docstring, file_path, node.lineno)
+
         # Check if abstract
         is_abstract = any(
             isinstance(base, ast.Name) and base.id == "ABC" for base in node.bases
@@ -334,6 +375,10 @@ class PythonParser(CodeParser):
             qualified_name = f"{base_name}:{node.lineno}"
 
         docstring = ast.get_docstring(node)
+
+        # Scan docstring for secrets
+        if docstring:
+            docstring = self._scan_and_redact_text(docstring, file_path, node.lineno)
 
         # Extract parameters
         parameters = [arg.arg for arg in node.args.args]

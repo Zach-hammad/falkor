@@ -19,6 +19,7 @@ from falkor.graph import Neo4jClient
 from falkor.detectors import AnalysisEngine
 from falkor.logging_config import configure_logging, get_logger, LogContext
 from falkor.config import load_config, FalkorConfig, ConfigError, generate_config_template, load_config_from_env
+from falkor.models import SecretsPolicy
 from falkor.validation import (
     ValidationError,
     validate_repository_path,
@@ -140,6 +141,12 @@ def cli(ctx: click.Context, config: str | None, log_level: str | None, log_forma
     help="Maximum file size in MB (overrides config)",
 )
 @click.option(
+    "--secrets-policy",
+    type=click.Choice(["redact", "block", "warn", "fail"], case_sensitive=False),
+    default=None,
+    help="Policy for handling detected secrets (overrides config, default: redact)",
+)
+@click.option(
     "--quiet",
     "-q",
     is_flag=True,
@@ -156,6 +163,7 @@ def ingest(
     pattern: tuple | None,
     follow_symlinks: bool | None,
     max_file_size: float | None,
+    secrets_policy: str | None,
     quiet: bool,
 ) -> None:
     """Ingest a codebase into the knowledge graph with security validation.
@@ -181,6 +189,10 @@ def ingest(
         final_patterns = list(pattern) if pattern else config.ingestion.patterns
         final_follow_symlinks = follow_symlinks if follow_symlinks is not None else config.ingestion.follow_symlinks
         final_max_file_size = max_file_size if max_file_size is not None else config.ingestion.max_file_size_mb
+        final_secrets_policy_str = secrets_policy if secrets_policy is not None else config.secrets.policy
+
+        # Convert secrets policy string to enum
+        final_secrets_policy = SecretsPolicy(final_secrets_policy_str)
 
         # Validate Neo4j URI
         final_neo4j_uri = validate_neo4j_uri(final_neo4j_uri)
@@ -241,7 +253,8 @@ def ingest(
                     db,
                     follow_symlinks=final_follow_symlinks,
                     max_file_size_mb=final_max_file_size,
-                    batch_size=validated_batch_size
+                    batch_size=validated_batch_size,
+                    secrets_policy=final_secrets_policy
                 )
 
                 # Setup progress bar if not in quiet mode

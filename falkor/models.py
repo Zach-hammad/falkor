@@ -117,6 +117,30 @@ class RelationshipType(str, Enum):
     RELATED_TO = "RELATED_TO"
 
 
+class SecretsPolicy(str, Enum):
+    """Policy for handling detected secrets during code ingestion.
+
+    Determines how Falkor responds when secrets are detected in code.
+    This is a critical security feature to prevent storing sensitive data
+    in Neo4j or sending it to OpenAI APIs.
+
+    Attributes:
+        REDACT: Replace secrets with [REDACTED] placeholder (default, safe)
+        BLOCK: Refuse to ingest entity containing secrets (strictest)
+        WARN: Log warning but continue with original text (risky)
+        FAIL: Abort entire ingestion process (for CI/CD enforcement)
+
+    Example:
+        >>> policy = SecretsPolicy.REDACT
+        >>> if policy == SecretsPolicy.BLOCK:
+        ...     raise ValueError("Secret detected, blocking ingestion")
+    """
+    REDACT = "redact"
+    BLOCK = "block"
+    WARN = "warn"
+    FAIL = "fail"
+
+
 @dataclass
 class Entity:
     """Base entity extracted from code.
@@ -372,6 +396,45 @@ class Concept:
     description: str
     confidence: float = 0.5
     embedding: Optional[List[float]] = None
+
+
+@dataclass
+class SecretMatch:
+    """Detected secret in code or documentation.
+
+    Represents a potential secret (API key, password, token, etc.) detected
+    during code ingestion. Used to redact or block sensitive data before
+    storing in Neo4j or sending to AI services.
+
+    Attributes:
+        secret_type: Type of secret detected (e.g., "AWS Access Key", "Private Key")
+        start_index: Character index where secret starts in the text
+        end_index: Character index where secret ends in the text
+        context: File path and line number where secret was found
+        filename: File containing the secret
+        line_number: Line number where secret appears
+        plugin_name: Name of detect-secrets plugin that found it
+
+    Example:
+        >>> match = SecretMatch(
+        ...     secret_type="AWS Access Key",
+        ...     start_index=45,
+        ...     end_index=65,
+        ...     context="config.py:12",
+        ...     filename="config.py",
+        ...     line_number=12,
+        ...     plugin_name="AWSKeyDetector"
+        ... )
+        >>> print(f"Found {match.secret_type} at {match.context}")
+        Found AWS Access Key at config.py:12
+    """
+    secret_type: str
+    start_index: int
+    end_index: int
+    context: str
+    filename: str
+    line_number: int
+    plugin_name: str
 
 
 @dataclass

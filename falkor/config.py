@@ -149,6 +149,13 @@ class DetectorConfig:
 
 
 @dataclass
+class SecretsConfig:
+    """Secrets detection configuration."""
+    enabled: bool = True
+    policy: str = "redact"  # redact, block, warn, fail
+
+
+@dataclass
 class LoggingConfig:
     """Logging configuration."""
     level: str = "INFO"
@@ -163,6 +170,7 @@ class FalkorConfig:
     ingestion: IngestionConfig = field(default_factory=IngestionConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     detectors: DetectorConfig = field(default_factory=DetectorConfig)
+    secrets: SecretsConfig = field(default_factory=SecretsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     @classmethod
@@ -183,6 +191,7 @@ class FalkorConfig:
             ingestion=IngestionConfig(**data.get("ingestion", {})),
             analysis=AnalysisConfig(**data.get("analysis", {})),
             detectors=DetectorConfig(**data.get("detectors", {})),
+            secrets=SecretsConfig(**data.get("secrets", {})),
             logging=LoggingConfig(**data.get("logging", {})),
         )
 
@@ -217,6 +226,10 @@ class FalkorConfig:
                 "god_class_medium_loc": self.detectors.god_class_medium_loc,
                 "god_class_high_lcom": self.detectors.god_class_high_lcom,
                 "god_class_medium_lcom": self.detectors.god_class_medium_lcom,
+            },
+            "secrets": {
+                "enabled": self.secrets.enabled,
+                "policy": self.secrets.policy,
             },
             "logging": {
                 "level": self.logging.level,
@@ -474,6 +487,15 @@ def load_config_from_env() -> Dict[str, Any]:
             logger.warning(f"Invalid FALKOR_ANALYSIS_MAX_COUPLING: {max_coupling}")
     if analysis:
         config["analysis"] = analysis
+
+    # Secrets configuration
+    secrets = {}
+    if secrets_enabled := os.getenv("FALKOR_SECRETS_ENABLED"):
+        secrets["enabled"] = secrets_enabled.lower() in ("true", "1", "yes")
+    if secrets_policy := os.getenv("FALKOR_SECRETS_POLICY"):
+        secrets["policy"] = secrets_policy.lower()
+    if secrets:
+        config["secrets"] = secrets
 
     # Logging configuration (support both FALKOR_ prefix and unprefixed)
     logging_cfg = {}
