@@ -64,4 +64,5 @@ analysis_results.json
 
 # Temporary test files
 test_ingestion.py
+benchmark.py
 tests/unit/
