@@ -12,6 +12,8 @@ from falkor.models import (
     ModuleEntity,
     ClassEntity,
     FunctionEntity,
+    VariableEntity,
+    AttributeEntity,
     Relationship,
     NodeType,
     RelationshipType,
@@ -62,11 +64,12 @@ class PythonParser(CodeParser):
                 class_entity = self._extract_class(node, file_path)
                 entities.append(class_entity)
 
-                # Extract methods from class
+                # Extract methods from class - pass class qualified name with line number
+                class_qualified_name = f"{node.name}:{node.lineno}"
                 for item in node.body:
                     if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         method_entity = self._extract_function(
-                            item, file_path, class_name=node.name
+                            item, file_path, class_name=class_qualified_name
                         )
                         entities.append(method_entity)
 
@@ -79,6 +82,10 @@ class PythonParser(CodeParser):
         # Extract module entities from imports
         module_entities = self._extract_modules(tree, file_path)
         entities.extend(module_entities)
+
+        # Extract attributes (self.x) from class methods
+        attribute_entities = self._extract_attributes(tree, file_path)
+        entities.extend(attribute_entities)
 
         return entities
 
@@ -159,6 +166,9 @@ class PythonParser(CodeParser):
         # Extract method override relationships
         self._extract_overrides(tree, file_path, entity_map, relationships)
 
+        # Extract USES relationships (methods accessing attributes)
+        self._extract_attribute_usage(tree, file_path, entity_map, relationships)
+
         # Create CONTAINS relationships
         file_qualified_name = file_path
         for entity in entities:
@@ -193,6 +203,9 @@ class PythonParser(CodeParser):
         with open(file_path, "r") as f:
             loc = len([line for line in f if line.strip()])
 
+        # Extract __all__ exports
+        exports = self._extract_exports(tree)
+
         return FileEntity(
             name=path_obj.name,
             qualified_name=file_path,
@@ -202,7 +215,33 @@ class PythonParser(CodeParser):
             language="python",
             loc=loc,
             hash=file_hash,
+            exports=exports,
         )
+
+    def _get_decorator_name(self, decorator: ast.expr) -> str:
+        """Extract decorator name from decorator AST node.
+
+        Args:
+            decorator: Decorator AST node
+
+        Returns:
+            Decorator name as string
+        """
+        if isinstance(decorator, ast.Name):
+            # Simple decorator: @property, @staticmethod
+            return decorator.id
+        elif isinstance(decorator, ast.Attribute):
+            # Attribute decorator: @property.setter
+            return ast.unparse(decorator)
+        elif isinstance(decorator, ast.Call):
+            # Decorator with arguments: @decorator(arg1, arg2)
+            return ast.unparse(decorator)
+        else:
+            # Other decorator types
+            try:
+                return ast.unparse(decorator)
+            except:
+                return "unknown_decorator"
 
     def _extract_class(self, node: ast.ClassDef, file_path: str) -> ClassEntity:
         """Extract class entity from AST node.
@@ -214,13 +253,17 @@ class PythonParser(CodeParser):
         Returns:
             ClassEntity
         """
-        qualified_name = f"{file_path}::{node.name}"
+        # Include line number to handle nested classes with same name
+        qualified_name = f"{file_path}::{node.name}:{node.lineno}"
         docstring = ast.get_docstring(node)
 
         # Check if abstract
         is_abstract = any(
             isinstance(base, ast.Name) and base.id == "ABC" for base in node.bases
         )
+
+        # Extract decorators
+        decorators = [self._get_decorator_name(dec) for dec in node.decorator_list]
 
         return ClassEntity(
             name=node.name,
@@ -231,6 +274,7 @@ class PythonParser(CodeParser):
             docstring=docstring,
             is_abstract=is_abstract,
             complexity=self._calculate_complexity(node),
+            decorators=decorators,
         )
 
     def _extract_function(
@@ -246,15 +290,59 @@ class PythonParser(CodeParser):
         Returns:
             FunctionEntity
         """
+        # Extract all decorators
+        decorators: List[str] = []
+        decorator_suffix = ""
+
+        for decorator in node.decorator_list:
+            if isinstance(decorator, ast.Name):
+                # Simple decorator: @property, @staticmethod, etc.
+                decorator_name = decorator.id
+                decorators.append(decorator_name)
+                if decorator_name == "property":
+                    decorator_suffix = "@property"
+            elif isinstance(decorator, ast.Attribute):
+                # Attribute decorator: @property.setter, @functools.lru_cache
+                decorator_name = ast.unparse(decorator)
+                decorators.append(decorator_name)
+                if decorator.attr in ("setter", "deleter", "getter"):
+                    decorator_suffix = f"@{decorator.attr}"
+            elif isinstance(decorator, ast.Call):
+                # Decorator with arguments: @decorator(arg1, arg2)
+                decorator_name = ast.unparse(decorator)
+                decorators.append(decorator_name)
+            else:
+                # Other decorator types
+                try:
+                    decorator_name = ast.unparse(decorator)
+                    decorators.append(decorator_name)
+                except:
+                    decorators.append("unknown_decorator")
+
+        # Build qualified name with line number to ensure uniqueness
+        # Format: file::class.function@decorator:line
         if class_name:
-            qualified_name = f"{file_path}::{class_name}.{node.name}"
+            base_name = f"{file_path}::{class_name}.{node.name}"
         else:
-            qualified_name = f"{file_path}::{node.name}"
+            base_name = f"{file_path}::{node.name}"
+
+        # Add decorator suffix if present
+        if decorator_suffix:
+            qualified_name = f"{base_name}{decorator_suffix}:{node.lineno}"
+        else:
+            # Add line number to handle same-name functions/methods
+            qualified_name = f"{base_name}:{node.lineno}"
 
         docstring = ast.get_docstring(node)
 
         # Extract parameters
         parameters = [arg.arg for arg in node.args.args]
+
+        # Extract parameter type annotations
+        parameter_types = {}
+        for arg in node.args.args:
+            if arg.annotation:
+                parameter_types[arg.arg] = ast.unparse(arg.annotation)
 
         # Extract return type if annotated
         return_type = None
@@ -269,9 +357,11 @@ class PythonParser(CodeParser):
             line_end=node.end_lineno or node.lineno,
             docstring=docstring,
             parameters=parameters,
+            parameter_types=parameter_types,
             return_type=return_type,
             complexity=self._calculate_complexity(node),
             is_async=isinstance(node, ast.AsyncFunctionDef),
+            decorators=decorators,
         )
 
     def _calculate_complexity(self, node: ast.AST) -> int:
@@ -354,39 +444,44 @@ class PythonParser(CodeParser):
             def __init__(self, file_path: str):
                 self.file_path = file_path
                 self.current_class: Optional[str] = None
-                self.function_stack: List[str] = []  # Stack for nested functions
+                self.current_class_line: Optional[int] = None
+                self.function_stack: List[tuple[str, int]] = []  # Stack for nested functions (name, line)
                 self.calls: List[tuple[str, str, int]] = []  # (caller, callee, line)
 
             def visit_ClassDef(self, node: ast.ClassDef) -> None:
                 """Visit class definition."""
                 old_class = self.current_class
+                old_class_line = self.current_class_line
                 self.current_class = node.name
+                self.current_class_line = node.lineno
                 self.generic_visit(node)
                 self.current_class = old_class
+                self.current_class_line = old_class_line
 
             def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
                 """Visit function definition."""
-                self.function_stack.append(node.name)
+                self.function_stack.append((node.name, node.lineno))
                 self.generic_visit(node)
                 self.function_stack.pop()
 
             def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
                 """Visit async function definition."""
-                self.function_stack.append(node.name)
+                self.function_stack.append((node.name, node.lineno))
                 self.generic_visit(node)
                 self.function_stack.pop()
 
             def visit_Call(self, node: ast.Call) -> None:
                 """Visit function call."""
                 if self.function_stack:
-                    # Build function name from stack (handles nested functions)
-                    func_name = ".".join(self.function_stack)
+                    # Build function qualified name from stack with line numbers
+                    # For nested functions, use just the innermost function
+                    func_name, func_line = self.function_stack[-1]
 
-                    # Determine caller qualified name
-                    if self.current_class:
-                        caller = f"{self.file_path}::{self.current_class}.{func_name}"
+                    # Determine caller qualified name with line number
+                    if self.current_class and self.current_class_line:
+                        caller = f"{self.file_path}::{self.current_class}:{self.current_class_line}.{func_name}:{func_line}"
                     else:
-                        caller = f"{self.file_path}::{func_name}"
+                        caller = f"{self.file_path}::{func_name}:{func_line}"
 
                     # Determine callee name (best effort)
                     callee = self._get_call_name(node)
@@ -471,7 +566,8 @@ class PythonParser(CodeParser):
         # Now extract inheritance relationships
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef):
-                child_class_qualified = f"{file_path}::{node.name}"
+                # Use qualified name with line number
+                child_class_qualified = f"{file_path}::{node.name}:{node.lineno}"
 
                 # Extract base classes
                 for base in node.bases:
@@ -479,10 +575,12 @@ class PythonParser(CodeParser):
                     base_name = self._get_base_class_name(base)
                     if base_name:
                         # Determine the target qualified name
-                        # If base class is defined in this file, use file-qualified name
-                        # Otherwise, use the name as-is (could be simple or module.Class)
+                        # If base class is defined in this file, need to find its line number
+                        # For now, use just the name for external classes
                         if base_name in local_classes:
-                            # Intra-file inheritance
+                            # Intra-file inheritance - base_name is just the class name
+                            # We'll need to look up the full qualified name in entity_map
+                            # For now, use a simple pattern - this will be resolved in graph loading
                             base_qualified = f"{file_path}::{base_name}"
                         else:
                             # Imported or external base class
@@ -578,7 +676,53 @@ class PythonParser(CodeParser):
                 # (e.g., "from typing import List" - List is not a module)
                 # For now, we'll skip this and only create the parent module
 
+        # Detect dynamic imports (importlib.import_module, __import__)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                module_name = self._extract_dynamic_import(node)
+                if module_name and module_name not in modules:
+                    modules[module_name] = ModuleEntity(
+                        name=module_name.split(".")[-1],
+                        qualified_name=module_name,
+                        file_path=file_path,
+                        line_start=node.lineno,
+                        line_end=node.lineno,
+                        is_external=True,
+                        package=self._get_package_name(module_name),
+                        is_dynamic_import=True,
+                    )
+
         return list(modules.values())
+
+    def _extract_dynamic_import(self, node: ast.Call) -> Optional[str]:
+        """Extract module name from dynamic import call.
+
+        Handles:
+        - importlib.import_module("module_name")
+        - __import__("module_name")
+
+        Args:
+            node: Call AST node
+
+        Returns:
+            Module name if dynamic import detected, None otherwise
+        """
+        # Check for importlib.import_module()
+        if isinstance(node.func, ast.Attribute):
+            if node.func.attr == "import_module":
+                # Check if it's importlib.import_module
+                if isinstance(node.func.value, ast.Name) and node.func.value.id == "importlib":
+                    # Get the module name from first argument
+                    if node.args and isinstance(node.args[0], ast.Constant):
+                        return node.args[0].value
+
+        # Check for __import__()
+        elif isinstance(node.func, ast.Name) and node.func.id == "__import__":
+            # Get the module name from first argument
+            if node.args and isinstance(node.args[0], ast.Constant):
+                return node.args[0].value
+
+        return None
 
     def _get_package_name(self, module_name: str) -> Optional[str]:
         """Extract parent package name from module name.
@@ -592,6 +736,43 @@ class PythonParser(CodeParser):
         if "." in module_name:
             return module_name.rsplit(".", 1)[0]
         return None
+
+    def _extract_exports(self, tree: ast.AST) -> List[str]:
+        """Extract __all__ exports from module.
+
+        Args:
+            tree: Python AST
+
+        Returns:
+            List of exported names
+        """
+        exports: List[str] = []
+
+        # Look for __all__ assignment at module level
+        if hasattr(tree, "body"):
+            for node in tree.body:
+                if isinstance(node, ast.Assign):
+                    # Check if target is __all__
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and target.id == "__all__":
+                            # Extract the list of names
+                            if isinstance(node.value, ast.List):
+                                for elt in node.value.elts:
+                                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                                        exports.append(elt.value)
+                                    elif isinstance(elt, ast.Str):  # Python 3.7 compatibility
+                                        exports.append(elt.s)
+                elif isinstance(node, ast.AnnAssign):
+                    # Typed assignment: __all__: List[str] = [...]
+                    if isinstance(node.target, ast.Name) and node.target.id == "__all__":
+                        if isinstance(node.value, ast.List):
+                            for elt in node.value.elts:
+                                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                                    exports.append(elt.value)
+                                elif isinstance(elt, ast.Str):
+                                    exports.append(elt.s)
+
+        return exports
 
     def _extract_overrides(
         self,
@@ -612,7 +793,8 @@ class PythonParser(CodeParser):
             relationships: List to append relationships to
         """
         # Build a map of class_name -> class_node -> methods
-        class_info: Dict[str, tuple[ast.ClassDef, Dict[str, str]]] = {}
+        # Use (class_name, line_number) as key to handle nested classes with same name
+        class_info: Dict[tuple[str, int], tuple[ast.ClassDef, Dict[str, str]]] = {}
 
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef):
@@ -620,13 +802,14 @@ class PythonParser(CodeParser):
                 methods: Dict[str, str] = {}  # method_name -> qualified_name
                 for item in node.body:
                     if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        method_qualified = f"{file_path}::{node.name}.{item.name}"
+                        # Use new qualified name format with class line number
+                        method_qualified = f"{file_path}::{node.name}:{node.lineno}.{item.name}:{item.lineno}"
                         methods[item.name] = method_qualified
 
-                class_info[node.name] = (node, methods)
+                class_info[(node.name, node.lineno)] = (node, methods)
 
         # Now check for overrides
-        for class_name, (class_node, child_methods) in class_info.items():
+        for (class_name, class_line), (class_node, child_methods) in class_info.items():
             # Check each base class
             for base in class_node.bases:
                 base_name = self._get_base_class_name(base)
@@ -634,8 +817,15 @@ class PythonParser(CodeParser):
                     continue
 
                 # Check if base class is defined in this file
-                if base_name in class_info:
-                    parent_node, parent_methods = class_info[base_name]
+                # Need to find the base class by name in class_info
+                parent_info = None
+                for (cname, cline), (cnode, cmethods) in class_info.items():
+                    if cname == base_name:
+                        parent_info = (cnode, cmethods)
+                        break
+
+                if parent_info:
+                    parent_node, parent_methods = parent_info
 
                     # Check for method overrides
                     for method_name, child_method_qualified in child_methods.items():
@@ -656,6 +846,108 @@ class PythonParser(CodeParser):
                                         "method_name": method_name,
                                         "child_class": class_name,
                                         "parent_class": base_name,
+                                    },
+                                )
+                            )
+
+    def _extract_attributes(self, tree: ast.AST, file_path: str) -> List[AttributeEntity]:
+        """Extract attributes (self.x) accessed in class methods.
+
+        Args:
+            tree: Python AST
+            file_path: Path to source file
+
+        Returns:
+            List of AttributeEntity objects
+        """
+        attributes: Dict[str, AttributeEntity] = {}  # qualified_name -> entity
+
+        # Walk through all classes
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                class_name = node.name
+                class_line = node.lineno
+
+                # Find all self.attribute accesses in this class's methods
+                class_attributes = set()
+
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        # Walk through method body to find self.x accesses
+                        for child in ast.walk(item):
+                            if isinstance(child, ast.Attribute):
+                                # Check if it's self.something
+                                if isinstance(child.value, ast.Name) and child.value.id == "self":
+                                    attr_name = child.attr
+                                    class_attributes.add(attr_name)
+
+                # Create AttributeEntity for each unique attribute
+                for attr_name in class_attributes:
+                    # qualified_name: file::ClassName:line.attribute_name
+                    qualified_name = f"{file_path}::{class_name}:{class_line}.{attr_name}"
+
+                    if qualified_name not in attributes:
+                        attributes[qualified_name] = AttributeEntity(
+                            name=attr_name,
+                            qualified_name=qualified_name,
+                            file_path=file_path,
+                            line_start=class_line,  # Use class line since we don't know exact attribute definition line
+                            line_end=class_line,
+                            is_class_attribute=False,  # These are instance attributes
+                        )
+
+        return list(attributes.values())
+
+    def _extract_attribute_usage(
+        self,
+        tree: ast.AST,
+        file_path: str,
+        entity_map: Dict[str, Entity],
+        relationships: List[Relationship],
+    ) -> None:
+        """Extract USES relationships from methods to attributes.
+
+        Args:
+            tree: Python AST
+            file_path: Path to source file
+            entity_map: Map of qualified_name to Entity
+            relationships: List to append relationships to
+        """
+        # Walk through all classes
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                class_name = node.name
+                class_line = node.lineno
+
+                # Process each method
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        method_name = item.name
+                        method_line = item.lineno
+
+                        # Method qualified name with line number
+                        method_qualified = f"{file_path}::{class_name}:{class_line}.{method_name}:{method_line}"
+
+                        # Find all self.attribute accesses in this method
+                        accessed_attributes = set()
+                        for child in ast.walk(item):
+                            if isinstance(child, ast.Attribute):
+                                if isinstance(child.value, ast.Name) and child.value.id == "self":
+                                    attr_name = child.attr
+                                    accessed_attributes.add(attr_name)
+
+                        # Create USES relationship for each accessed attribute
+                        for attr_name in accessed_attributes:
+                            attr_qualified = f"{file_path}::{class_name}:{class_line}.{attr_name}"
+
+                            relationships.append(
+                                Relationship(
+                                    source_id=method_qualified,
+                                    target_id=attr_qualified,
+                                    rel_type=RelationshipType.USES,
+                                    properties={
+                                        "attribute_name": attr_name,
+                                        "class_name": class_name,
                                     },
                                 )
                             )

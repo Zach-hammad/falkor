@@ -1,7 +1,7 @@
 """Command-line interface for Falkor."""
 
 import click
-import logging
+import os
 from pathlib import Path
 from rich.console import Console
 from rich.table import Table
@@ -10,101 +10,268 @@ from rich.panel import Panel
 from falkor.pipeline import IngestionPipeline
 from falkor.graph import Neo4jClient
 from falkor.detectors import AnalysisEngine
+from falkor.logging_config import configure_logging, get_logger, LogContext
+from falkor.config import load_config, FalkorConfig, ConfigError, generate_config_template
 
 console = Console()
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+
+# Global config storage (loaded once per CLI invocation)
+_config: FalkorConfig | None = None
+
+
+def get_config() -> FalkorConfig:
+    """Get loaded configuration."""
+    global _config
+    if _config is None:
+        _config = FalkorConfig()  # Defaults
+    return _config
 
 
 @click.group()
 @click.version_option(version="0.1.0")
-def cli() -> None:
-    """Falkor - Graph-Powered Code Health Platform"""
-    pass
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to config file (.falkorrc or falkor.toml)",
+)
+@click.option(
+    "--log-level",
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], case_sensitive=False),
+    default=None,
+    help="Set logging level (overrides config file)",
+)
+@click.option(
+    "--log-format",
+    type=click.Choice(["json", "human"], case_sensitive=False),
+    default=None,
+    help="Log output format (overrides config file)",
+)
+@click.option(
+    "--log-file",
+    type=click.Path(),
+    default=None,
+    help="Write logs to file (overrides config file)",
+)
+@click.pass_context
+def cli(ctx: click.Context, config: str | None, log_level: str | None, log_format: str | None, log_file: str | None) -> None:
+    """Falkor - Graph-Powered Code Health Platform
+
+    Configuration priority (highest to lowest):
+    1. Command-line options
+    2. Config file (--config, .falkorrc, falkor.toml)
+    3. Environment variables
+    4. Built-in defaults
+    """
+    global _config
+
+    # Load configuration
+    try:
+        _config = load_config(config_file=config)
+    except ConfigError as e:
+        console.print(f"[yellow]⚠️  Config error: {e}[/yellow]")
+        console.print("[dim]Using default configuration[/dim]\n")
+        _config = FalkorConfig()
+
+    # Configure logging (CLI options override config)
+    final_log_level = log_level or _config.logging.level
+    final_log_format = log_format or _config.logging.format
+    final_log_file = log_file or _config.logging.file
+
+    configure_logging(
+        level=final_log_level,
+        json_output=(final_log_format == "json"),
+        log_file=final_log_file
+    )
+
+    # Store config in context for subcommands
+    ctx.ensure_object(dict)
+    ctx.obj['config'] = _config
 
 
 @cli.command()
 @click.argument("repo_path", type=click.Path(exists=True))
 @click.option(
-    "--neo4j-uri", default="bolt://localhost:7687", help="Neo4j connection URI"
+    "--neo4j-uri", default=None, help="Neo4j connection URI (overrides config)"
 )
-@click.option("--neo4j-user", default="neo4j", help="Neo4j username")
+@click.option("--neo4j-user", default=None, help="Neo4j username (overrides config)")
 @click.option(
     "--neo4j-password",
-    prompt=True,
-    hide_input=True,
-    help="Neo4j password",
+    default=None,
+    help="Neo4j password (overrides config, prompts if not provided)",
 )
 @click.option(
     "--pattern",
     "-p",
     multiple=True,
-    default=["**/*.py"],
-    help="File patterns to analyze",
+    default=None,
+    help="File patterns to analyze (overrides config)",
 )
+@click.option(
+    "--follow-symlinks",
+    is_flag=True,
+    default=None,
+    help="Follow symbolic links (overrides config)",
+)
+@click.option(
+    "--max-file-size",
+    type=float,
+    default=None,
+    help="Maximum file size in MB (overrides config)",
+)
+@click.pass_context
 def ingest(
-    repo_path: str, neo4j_uri: str, neo4j_user: str, neo4j_password: str, pattern: tuple
+    ctx: click.Context,
+    repo_path: str,
+    neo4j_uri: str | None,
+    neo4j_user: str | None,
+    neo4j_password: str | None,
+    pattern: tuple | None,
+    follow_symlinks: bool | None,
+    max_file_size: float | None,
 ) -> None:
-    """Ingest a codebase into the knowledge graph."""
+    """Ingest a codebase into the knowledge graph with security validation.
+
+    Security features:
+    - Repository path validation and boundary checks
+    - Symlink protection (disabled by default)
+    - File size limits (10MB default)
+    - Relative path storage (prevents system path exposure)
+    """
+    # Get config from context
+    config: FalkorConfig = ctx.obj['config']
+
+    # Apply config defaults (CLI options override config)
+    final_neo4j_uri = neo4j_uri or config.neo4j.uri
+    final_neo4j_user = neo4j_user or config.neo4j.user
+    final_neo4j_password = neo4j_password or config.neo4j.password
+    final_patterns = list(pattern) if pattern else config.ingestion.patterns
+    final_follow_symlinks = follow_symlinks if follow_symlinks is not None else config.ingestion.follow_symlinks
+    final_max_file_size = max_file_size if max_file_size is not None else config.ingestion.max_file_size_mb
+
+    # Prompt for password if not provided
+    if not final_neo4j_password:
+        final_neo4j_password = click.prompt("Neo4j password", hide_input=True)
+
     console.print(f"\n[bold cyan]🐉 Falkor Ingestion[/bold cyan]\n")
     console.print(f"Repository: {repo_path}")
-    console.print(f"Patterns: {', '.join(pattern)}\n")
+    console.print(f"Patterns: {', '.join(final_patterns)}")
+    console.print(f"Follow symlinks: {final_follow_symlinks}")
+    console.print(f"Max file size: {final_max_file_size}MB\n")
 
-    with Neo4jClient(neo4j_uri, neo4j_user, neo4j_password) as db:
-        pipeline = IngestionPipeline(repo_path, db)
-        pipeline.ingest(patterns=list(pattern))
+    try:
+        with LogContext(operation="ingest", repo_path=repo_path):
+            logger.info("Starting ingestion")
 
-        # Show stats
-        stats = db.get_stats()
-        table = Table(title="Ingestion Results")
-        table.add_column("Metric", style="cyan")
-        table.add_column("Count", style="green")
+            with Neo4jClient(final_neo4j_uri, final_neo4j_user, final_neo4j_password) as db:
+                pipeline = IngestionPipeline(
+                    repo_path,
+                    db,
+                    follow_symlinks=final_follow_symlinks,
+                    max_file_size_mb=final_max_file_size
+                )
+                pipeline.ingest(patterns=final_patterns)
 
-        for key, value in stats.items():
-            table.add_row(key.replace("_", " ").title(), str(value))
+                # Show stats
+                stats = db.get_stats()
+                logger.info("Ingestion complete", extra={"stats": stats})
 
-        console.print(table)
+                table = Table(title="Ingestion Results")
+                table.add_column("Metric", style="cyan")
+                table.add_column("Count", style="green")
+
+                for key, value in stats.items():
+                    table.add_row(key.replace("_", " ").title(), str(value))
+
+                console.print(table)
+
+                # Show security info if files were skipped
+                if pipeline.skipped_files:
+                    console.print(
+                        f"\n[yellow]⚠️  {len(pipeline.skipped_files)} files were skipped "
+                        f"(see logs for details)[/yellow]"
+                    )
+
+    except ValueError as e:
+        logger.error(f"Validation error: {e}")
+        console.print(f"\n[red]❌ Error: {e}[/red]")
+        raise click.Abort()
+    except Exception as e:
+        logger.exception("Unexpected error during ingestion")
+        console.print(f"\n[red]❌ Unexpected error: {e}[/red]")
+        raise
 
 
 @cli.command()
 @click.argument("repo_path", type=click.Path(exists=True))
 @click.option(
-    "--neo4j-uri", default="bolt://localhost:7687", help="Neo4j connection URI"
+    "--neo4j-uri", default=None, help="Neo4j connection URI (overrides config)"
 )
-@click.option("--neo4j-user", default="neo4j", help="Neo4j username")
+@click.option("--neo4j-user", default=None, help="Neo4j username (overrides config)")
 @click.option(
     "--neo4j-password",
-    prompt=True,
-    hide_input=True,
-    help="Neo4j password",
+    default=None,
+    help="Neo4j password (overrides config, prompts if not provided)",
 )
 @click.option(
     "--output", "-o", type=click.Path(), help="Output file for JSON report"
 )
+@click.pass_context
 def analyze(
+    ctx: click.Context,
     repo_path: str,
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
+    neo4j_uri: str | None,
+    neo4j_user: str | None,
+    neo4j_password: str | None,
     output: str | None,
 ) -> None:
     """Analyze codebase health and generate report."""
+    # Get config from context
+    config: FalkorConfig = ctx.obj['config']
+
+    # Apply config defaults (CLI options override config)
+    final_neo4j_uri = neo4j_uri or config.neo4j.uri
+    final_neo4j_user = neo4j_user or config.neo4j.user
+    final_neo4j_password = neo4j_password or config.neo4j.password
+
+    # Prompt for password if not provided
+    if not final_neo4j_password:
+        final_neo4j_password = click.prompt("Neo4j password", hide_input=True)
+
     console.print(f"\n[bold cyan]🐉 Falkor Analysis[/bold cyan]\n")
 
-    with Neo4jClient(neo4j_uri, neo4j_user, neo4j_password) as db:
-        engine = AnalysisEngine(db)
-        health = engine.analyze()
+    try:
+        with LogContext(operation="analyze", repo_path=repo_path):
+            logger.info("Starting analysis")
 
-        # Display results
-        _display_health_report(health)
+            with Neo4jClient(final_neo4j_uri, final_neo4j_user, final_neo4j_password) as db:
+                engine = AnalysisEngine(db)
+                health = engine.analyze()
 
-        # Save to file if requested
-        if output:
-            import json
+                logger.info("Analysis complete", extra={
+                    "grade": health.grade,
+                    "score": health.overall_score,
+                    "total_findings": health.findings_summary.total
+                })
 
-            with open(output, "w") as f:
-                json.dump(health.to_dict(), f, indent=2)
-            console.print(f"\n✅ Report saved to {output}")
+                # Display results
+                _display_health_report(health)
+
+                # Save to file if requested
+                if output:
+                    import json
+
+                    with open(output, "w") as f:
+                        json.dump(health.to_dict(), f, indent=2)
+                    logger.info(f"Report saved to {output}")
+                    console.print(f"\n✅ Report saved to {output}")
+
+    except Exception as e:
+        logger.exception("Error during analysis")
+        console.print(f"\n[red]❌ Error: {e}[/red]")
+        raise
 
 
 def _display_health_report(health) -> None:
@@ -180,6 +347,82 @@ def _display_health_report(health) -> None:
             findings_table.add_row("[blue]Low[/blue]", str(fs.low))
 
         console.print(findings_table)
+
+
+@cli.command()
+@click.option(
+    "--format",
+    "-f",
+    type=click.Choice(["yaml", "json", "toml"], case_sensitive=False),
+    default="yaml",
+    help="Config file format (default: yaml)",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(),
+    default=None,
+    help="Output file path (default: .falkorrc for yaml/json, falkor.toml for toml)",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Overwrite existing config file",
+)
+def init(format: str, output: str | None, force: bool) -> None:
+    """Initialize a new Falkor configuration file.
+
+    Creates a config file template with default values and comments.
+
+    Examples:
+        falkor init                    # Create .falkorrc (YAML)
+        falkor init -f json            # Create .falkorrc (JSON)
+        falkor init -f toml            # Create falkor.toml
+        falkor init -o myconfig.yaml   # Custom output path
+    """
+    console.print("\n[bold cyan]🐉 Falkor Configuration Init[/bold cyan]\n")
+
+    # Determine output file
+    if output:
+        output_path = Path(output)
+    else:
+        if format == "toml":
+            output_path = Path("falkor.toml")
+        else:
+            output_path = Path(".falkorrc")
+
+    # Check if file exists
+    if output_path.exists() and not force:
+        console.print(f"[yellow]⚠️  Config file already exists: {output_path}[/yellow]")
+        console.print("[dim]Use --force to overwrite[/dim]")
+        raise click.Abort()
+
+    try:
+        # Generate template
+        template = generate_config_template(format=format)
+
+        # Write to file
+        output_path.write_text(template)
+
+        console.print(f"[green]✓ Created config file: {output_path}[/green]")
+        console.print(f"\n[dim]Edit the file to customize your configuration.[/dim]")
+        console.print(f"[dim]Environment variables can be referenced using ${{VAR_NAME}} syntax.[/dim]\n")
+
+        # Show snippet
+        lines = template.split("\n")[:15]  # First 15 lines
+        console.print("[bold]Preview:[/bold]")
+        for line in lines:
+            console.print(f"[dim]{line}[/dim]")
+        if len(template.split("\n")) > 15:
+            console.print("[dim]...[/dim]\n")
+
+    except ConfigError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        raise click.Abort()
+    except Exception as e:
+        console.print(f"[red]❌ Unexpected error: {e}[/red]")
+        raise
 
 
 def main() -> None:

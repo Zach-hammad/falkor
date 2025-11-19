@@ -189,6 +189,8 @@ class Neo4jClient:
                     entity_dict["hash"] = e.hash
                 if hasattr(e, "language"):  # File
                     entity_dict["language"] = e.language
+                if hasattr(e, "exports"):  # File
+                    entity_dict["exports"] = e.exports
                 if hasattr(e, "is_abstract"):  # Class
                     entity_dict["is_abstract"] = e.is_abstract
                 if hasattr(e, "complexity"):  # Class/Function
@@ -199,6 +201,8 @@ class Neo4jClient:
                     entity_dict["return_type"] = e.return_type
                 if hasattr(e, "is_async"):  # Function
                     entity_dict["is_async"] = e.is_async
+                if hasattr(e, "decorators"):  # Function
+                    entity_dict["decorators"] = e.decorators
 
                 entity_dicts.append(entity_dict)
 

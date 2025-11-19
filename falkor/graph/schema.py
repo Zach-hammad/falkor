@@ -17,6 +17,7 @@ class GraphSchema:
 
     # Index definitions for performance
     INDEXES = [
+        # Basic indexes
         "CREATE INDEX file_path_idx IF NOT EXISTS FOR (f:File) ON (f.filePath)",
         "CREATE INDEX file_language_idx IF NOT EXISTS FOR (f:File) ON (f.language)",
         "CREATE INDEX module_name_idx IF NOT EXISTS FOR (m:Module) ON (m.qualifiedName)",
@@ -24,6 +25,13 @@ class GraphSchema:
         "CREATE INDEX class_name_idx IF NOT EXISTS FOR (c:Class) ON (c.qualifiedName)",
         "CREATE INDEX function_name_idx IF NOT EXISTS FOR (f:Function) ON (f.qualifiedName)",
         "CREATE INDEX concept_name_idx IF NOT EXISTS FOR (c:Concept) ON (c.name)",
+        "CREATE INDEX attribute_name_idx IF NOT EXISTS FOR (a:Attribute) ON (a.name)",
+        "CREATE INDEX variable_name_idx IF NOT EXISTS FOR (v:Variable) ON (v.name)",
+        # Function and class name pattern matching (for STARTS WITH queries)
+        "CREATE INDEX function_simple_name_idx IF NOT EXISTS FOR (f:Function) ON (f.name)",
+        "CREATE INDEX class_simple_name_idx IF NOT EXISTS FOR (c:Class) ON (c.name)",
+        # File exports for dead code detection
+        "CREATE INDEX file_exports_idx IF NOT EXISTS FOR (f:File) ON (f.exports)",
         # Full-text search indexes
         "CREATE FULLTEXT INDEX function_docstring_idx IF NOT EXISTS FOR (f:Function) ON EACH [f.docstring]",
         "CREATE FULLTEXT INDEX class_docstring_idx IF NOT EXISTS FOR (c:Class) ON EACH [c.docstring]",

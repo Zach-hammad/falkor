@@ -1,32 +1,86 @@
 """Main ingestion pipeline for processing codebases."""
 
-import logging
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from falkor.graph import Neo4jClient, GraphSchema
 from falkor.parsers import CodeParser, PythonParser
 from falkor.models import Entity, Relationship
+from falkor.logging_config import get_logger, LogContext, log_operation
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+
+
+class SecurityError(Exception):
+    """Raised when a security violation is detected."""
+    pass
 
 
 class IngestionPipeline:
     """Pipeline for ingesting code into the knowledge graph."""
 
-    def __init__(self, repo_path: str, neo4j_client: Neo4jClient):
-        """Initialize ingestion pipeline.
+    # Security limits
+    MAX_FILE_SIZE_MB = 10  # Maximum file size to process
+    DEFAULT_FOLLOW_SYMLINKS = False  # Don't follow symlinks by default
+
+    def __init__(
+        self,
+        repo_path: str,
+        neo4j_client: Neo4jClient,
+        follow_symlinks: bool = DEFAULT_FOLLOW_SYMLINKS,
+        max_file_size_mb: float = MAX_FILE_SIZE_MB
+    ):
+        """Initialize ingestion pipeline with security validation.
 
         Args:
             repo_path: Path to repository root
             neo4j_client: Neo4j database client
+            follow_symlinks: Whether to follow symbolic links (default: False for security)
+            max_file_size_mb: Maximum file size in MB to process (default: 10MB)
+
+        Raises:
+            ValueError: If repository path is invalid
+            SecurityError: If path violates security constraints
         """
-        self.repo_path = Path(repo_path)
+        # Check if path is a symlink BEFORE resolving (security)
+        repo_path_obj = Path(repo_path)
+        if repo_path_obj.is_symlink():
+            raise SecurityError(
+                f"Repository path cannot be a symbolic link: {repo_path}\n"
+                f"Symlinks in the repository root are not allowed for security reasons."
+            )
+
+        # Resolve to absolute canonical path
+        self.repo_path = repo_path_obj.resolve()
+
+        # Validate repository path
+        self._validate_repo_path()
+
         self.db = neo4j_client
         self.parsers: Dict[str, CodeParser] = {}
+        self.follow_symlinks = follow_symlinks
+        self.max_file_size_mb = max_file_size_mb
+
+        # Track skipped files for reporting
+        self.skipped_files: List[Dict[str, str]] = []
 
         # Register default parsers
         self.register_parser("python", PythonParser())
+
+    def _validate_repo_path(self) -> None:
+        """Validate repository path for security.
+
+        Raises:
+            ValueError: If path doesn't exist or isn't a directory
+        """
+        if not self.repo_path.exists():
+            raise ValueError(f"Repository does not exist: {self.repo_path}")
+
+        if not self.repo_path.is_dir():
+            raise ValueError(f"Repository must be a directory: {self.repo_path}")
+
+        logger.info(f"Repository path validated: {self.repo_path}")
 
     def register_parser(self, language: str, parser: CodeParser) -> None:
         """Register a language parser.
@@ -38,14 +92,97 @@ class IngestionPipeline:
         self.parsers[language] = parser
         logger.info(f"Registered parser for {language}")
 
+    def _validate_file_path(self, file_path: Path) -> None:
+        """Validate file path is within repository boundary.
+
+        Args:
+            file_path: Path to validate
+
+        Raises:
+            SecurityError: If file is outside repository or violates security constraints
+        """
+        # Resolve to absolute path
+        resolved_file = file_path.resolve()
+
+        # Check if file is within repository boundary
+        try:
+            resolved_file.relative_to(self.repo_path)
+        except ValueError:
+            raise SecurityError(
+                f"Security violation: File is outside repository boundary\n"
+                f"File: {file_path}\n"
+                f"Repository: {self.repo_path}\n"
+                f"This could be a path traversal attack."
+            )
+
+    def _validate_file_size(self, file_path: Path) -> bool:
+        """Validate file size is within limits.
+
+        Args:
+            file_path: Path to check
+
+        Returns:
+            True if file is within size limit, False otherwise
+        """
+        try:
+            size_mb = file_path.stat().st_size / (1024 * 1024)
+            if size_mb > self.max_file_size_mb:
+                logger.warning(
+                    f"Skipping file {file_path}: size {size_mb:.1f}MB exceeds limit of {self.max_file_size_mb}MB"
+                )
+                self.skipped_files.append({
+                    "file": str(file_path),
+                    "reason": f"File too large: {size_mb:.1f}MB > {self.max_file_size_mb}MB"
+                })
+                return False
+            return True
+        except Exception as e:
+            logger.warning(f"Could not check file size for {file_path}: {e}")
+            return True  # Allow file if size check fails
+
+    def _should_skip_file(self, file_path: Path) -> bool:
+        """Check if file should be skipped for security or other reasons.
+
+        Args:
+            file_path: Path to check
+
+        Returns:
+            True if file should be skipped
+        """
+        # Skip symlinks by default (security)
+        if file_path.is_symlink() and not self.follow_symlinks:
+            logger.warning(f"Skipping symlink: {file_path} (use --follow-symlinks to include)")
+            self.skipped_files.append({
+                "file": str(file_path),
+                "reason": "Symbolic link (security)"
+            })
+            return True
+
+        # Validate file size
+        if not self._validate_file_size(file_path):
+            return True
+
+        # Validate path boundary
+        try:
+            self._validate_file_path(file_path)
+        except SecurityError as e:
+            logger.error(f"Security check failed for {file_path}: {e}")
+            self.skipped_files.append({
+                "file": str(file_path),
+                "reason": "Outside repository boundary"
+            })
+            return True
+
+        return False
+
     def scan(self, patterns: Optional[List[str]] = None) -> List[Path]:
-        """Scan repository for source files.
+        """Scan repository for source files with security validation.
 
         Args:
             patterns: List of glob patterns to match (default: ['**/*.py'])
 
         Returns:
-            List of file paths
+            List of validated file paths
         """
         if patterns is None:
             patterns = ["**/*.py"]  # Default to Python files
@@ -57,21 +194,58 @@ class IngestionPipeline:
         # Filter out common directories to ignore
         ignored_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv", "build", "dist"}
         files = [
-            f for f in files if not any(ignored in f.parts for ignored in ignored_dirs)
+            f for f in files
+            if f.is_file()
+            and not any(ignored in f.parts for ignored in ignored_dirs)
+            and not self._should_skip_file(f)
         ]
 
-        logger.info(f"Found {len(files)} source files")
+        logger.info(f"Found {len(files)} source files (skipped {len(self.skipped_files)} files)")
         return files
 
-    def parse_and_extract(self, file_path: Path) -> tuple[List[Entity], List[Relationship]]:
-        """Parse a file and extract entities/relationships.
+    def _get_relative_path(self, file_path: Path) -> str:
+        """Get relative path from repository root.
+
+        Stores relative paths instead of absolute paths for security
+        (avoids exposing full system paths in database).
 
         Args:
-            file_path: Path to source file
+            file_path: Absolute file path
+
+        Returns:
+            Relative path string from repository root
+        """
+        try:
+            return str(file_path.relative_to(self.repo_path))
+        except ValueError:
+            # Should not happen due to validation, but handle gracefully
+            logger.warning(f"Could not make path relative: {file_path}")
+            return str(file_path)
+
+    def parse_and_extract(self, file_path: Path) -> tuple[List[Entity], List[Relationship]]:
+        """Parse a file and extract entities/relationships with security validation.
+
+        Args:
+            file_path: Path to source file (must be within repository)
 
         Returns:
             Tuple of (entities, relationships)
+
+        Note:
+            All file paths stored in entities will be relative to repository root
+            for security (avoids exposing system structure).
         """
+        # Security validation
+        try:
+            self._validate_file_path(file_path)
+        except SecurityError as e:
+            logger.error(f"Security validation failed: {e}")
+            self.skipped_files.append({
+                "file": str(file_path),
+                "reason": "Security validation failed"
+            })
+            return [], []
+
         # Determine language from extension
         language = self._detect_language(file_path)
 
@@ -83,12 +257,23 @@ class IngestionPipeline:
 
         try:
             entities, relationships = parser.process_file(str(file_path))
+
+            # Convert all entity file paths to relative paths for security
+            for entity in entities:
+                if hasattr(entity, 'file_path') and entity.file_path:
+                    # Store relative path instead of absolute
+                    entity.file_path = self._get_relative_path(Path(entity.file_path))
+
             logger.debug(
                 f"Extracted {len(entities)} entities and {len(relationships)} relationships from {file_path}"
             )
             return entities, relationships
         except Exception as e:
             logger.error(f"Failed to parse {file_path}: {e}")
+            self.skipped_files.append({
+                "file": str(file_path),
+                "reason": f"Parse error: {str(e)}"
+            })
             return [], []
 
     def load_to_graph(
@@ -119,50 +304,124 @@ class IngestionPipeline:
         except Exception as e:
             logger.error(f"Failed to load data to graph: {e}")
 
+    @log_operation("ingest")
     def ingest(self, incremental: bool = False, patterns: Optional[List[str]] = None) -> None:
-        """Run the complete ingestion pipeline.
+        """Run the complete ingestion pipeline with security validation.
 
         Args:
             incremental: If True, only process changed files
             patterns: File patterns to match
         """
-        logger.info(f"Starting ingestion of {self.repo_path}")
+        start_time = time.time()
+
+        # Reset skipped files tracking
+        self.skipped_files = []
 
         # Initialize schema
-        schema = GraphSchema(self.db)
-        schema.initialize()
+        with LogContext(operation="init_schema"):
+            schema = GraphSchema(self.db)
+            schema.initialize()
+            logger.debug("Schema initialized")
 
         # Scan for files
-        files = self.scan(patterns)
+        with LogContext(operation="scan_files"):
+            files = self.scan(patterns)
+            logger.info(f"Scanned repository", extra={
+                "files_found": len(files),
+                "patterns": patterns or ["**/*.py"]
+            })
 
         if not files:
             logger.warning("No files found to process")
+            if self.skipped_files:
+                self._report_skipped_files()
             return
 
         # Process each file
         all_entities = []
         all_relationships = []
+        files_processed = 0
+        files_failed = 0
 
         for i, file_path in enumerate(files, 1):
-            logger.info(f"Processing {i}/{len(files)}: {file_path}")
+            with LogContext(operation="parse_file", file=str(file_path), progress=f"{i}/{len(files)}"):
+                logger.debug(f"Processing file {i}/{len(files)}: {file_path}")
 
-            entities, relationships = self.parse_and_extract(file_path)
-            all_entities.extend(entities)
-            all_relationships.extend(relationships)
+                entities, relationships = self.parse_and_extract(file_path)
 
-            # Batch load every 10 files for better performance
-            if len(all_entities) >= 100:
-                self.load_to_graph(all_entities, all_relationships)
-                all_entities = []
-                all_relationships = []
+                if entities:
+                    files_processed += 1
+                    all_entities.extend(entities)
+                    all_relationships.extend(relationships)
+                else:
+                    files_failed += 1
+
+                # Batch load every 100 entities for better performance
+                if len(all_entities) >= 100:
+                    batch_start = time.time()
+                    self.load_to_graph(all_entities, all_relationships)
+                    batch_duration = time.time() - batch_start
+
+                    logger.debug("Loaded batch", extra={
+                        "entities": len(all_entities),
+                        "relationships": len(all_relationships),
+                        "duration_seconds": round(batch_duration, 3)
+                    })
+
+                    all_entities = []
+                    all_relationships = []
 
         # Load remaining entities
         if all_entities:
             self.load_to_graph(all_entities, all_relationships)
+            logger.debug("Loaded final batch", extra={
+                "entities": len(all_entities),
+                "relationships": len(all_relationships)
+            })
 
         # Show stats
         stats = self.db.get_stats()
-        logger.info(f"Ingestion complete! Stats: {stats}")
+        total_duration = time.time() - start_time
+
+        logger.info("Ingestion complete", extra={
+            "stats": stats,
+            "files_total": len(files),
+            "files_processed": files_processed,
+            "files_failed": files_failed,
+            "files_skipped": len(self.skipped_files),
+            "duration_seconds": round(total_duration, 2),
+            "files_per_second": round(len(files) / total_duration, 2) if total_duration > 0 else 0
+        })
+
+        # Report skipped files if any
+        if self.skipped_files:
+            self._report_skipped_files()
+
+    def _report_skipped_files(self) -> None:
+        """Report skipped files summary."""
+        if not self.skipped_files:
+            return
+
+        logger.warning(f"\n{'='*60}")
+        logger.warning(f"SKIPPED FILES SUMMARY: {len(self.skipped_files)} files were skipped")
+        logger.warning(f"{'='*60}")
+
+        # Group by reason
+        reasons: Dict[str, List[str]] = {}
+        for item in self.skipped_files:
+            reason = item["reason"]
+            if reason not in reasons:
+                reasons[reason] = []
+            reasons[reason].append(item["file"])
+
+        for reason, files in reasons.items():
+            logger.warning(f"\n{reason}: {len(files)} files")
+            for file in files[:5]:  # Show first 5
+                logger.warning(f"  - {file}")
+            if len(files) > 5:
+                logger.warning(f"  ... and {len(files) - 5} more")
+
+        logger.warning(f"\n{'='*60}\n")
 
     def _detect_language(self, file_path: Path) -> str:
         """Detect programming language from file extension.

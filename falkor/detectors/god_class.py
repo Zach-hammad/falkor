@@ -45,7 +45,7 @@ class GodClassDetector(CodeSmellDetector):
              sum(m.complexity) AS total_complexity,
              COALESCE(c.lineEnd, 0) - COALESCE(c.lineStart, 0) AS loc
         WITH c, file, methods, size(methods) AS method_count, total_complexity, loc
-        WHERE method_count >= 10 OR total_complexity >= 30 OR loc >= 200
+        WHERE method_count >= 15 OR total_complexity >= 50 OR loc >= 300
         UNWIND methods AS m
         OPTIONAL MATCH (m)-[:CALLS]->(called)
         WITH c, file, methods, method_count, total_complexity, loc,
@@ -78,6 +78,12 @@ class GodClassDetector(CodeSmellDetector):
             if is_abstract and method_count < 25:
                 continue
 
+            name = record["name"]
+
+            # Skip test classes (they naturally have many test methods)
+            if name.startswith("Test") or name.endswith("Test") or "Test" in name:
+                continue
+
             # Calculate LCOM (Lack of Cohesion of Methods)
             qualified_name = record["qualified_name"]
             lcom = self._calculate_lcom(qualified_name)
@@ -90,7 +96,6 @@ class GodClassDetector(CodeSmellDetector):
             if not is_god_class:
                 continue
 
-            name = record["name"]
             file_path = record["containing_file"] or record["file_path"]
             line_start = record["line_start"]
             line_end = record["line_end"]

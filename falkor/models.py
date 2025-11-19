@@ -23,6 +23,8 @@ class NodeType(str, Enum):
     FUNCTION = "Function"
     CONCEPT = "Concept"
     IMPORT = "Import"
+    VARIABLE = "Variable"
+    ATTRIBUTE = "Attribute"
 
 
 class RelationshipType(str, Enum):
@@ -62,6 +64,7 @@ class FileEntity(Entity):
     language: str = "python"
     loc: int = 0
     hash: str = ""
+    exports: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.FILE
@@ -72,6 +75,7 @@ class ModuleEntity(Entity):
     """Module/Package node."""
     is_external: bool = True  # True if from external package, False if in codebase
     package: Optional[str] = None  # Parent package (e.g., "os" for "os.path")
+    is_dynamic_import: bool = False  # True if imported via importlib or __import__
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.MODULE
@@ -82,6 +86,7 @@ class ClassEntity(Entity):
     """Class node."""
     is_abstract: bool = False
     complexity: int = 0
+    decorators: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.CLASS
@@ -91,12 +96,33 @@ class ClassEntity(Entity):
 class FunctionEntity(Entity):
     """Function/method node."""
     parameters: List[str] = field(default_factory=list)
+    parameter_types: dict = field(default_factory=dict)  # Maps param name -> type annotation
     return_type: Optional[str] = None
     complexity: int = 0
     is_async: bool = False
+    decorators: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.FUNCTION
+
+
+@dataclass
+class VariableEntity(Entity):
+    """Variable node (local variable or function parameter)."""
+    variable_type: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.VARIABLE
+
+
+@dataclass
+class AttributeEntity(Entity):
+    """Attribute node (instance or class attribute)."""
+    attribute_type: Optional[str] = None
+    is_class_attribute: bool = False
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.ATTRIBUTE
 
 
 @dataclass

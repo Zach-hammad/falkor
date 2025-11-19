@@ -1,6 +1,6 @@
 """Analysis engine that orchestrates all detectors."""
 
-import logging
+import time
 from typing import Dict, List
 
 from falkor.graph import Neo4jClient
@@ -14,8 +14,9 @@ from falkor.models import (
 from falkor.detectors.circular_dependency import CircularDependencyDetector
 from falkor.detectors.dead_code import DeadCodeDetector
 from falkor.detectors.god_class import GodClassDetector
+from falkor.logging_config import get_logger, LogContext
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class AnalysisEngine:
@@ -53,39 +54,50 @@ class AnalysisEngine:
         Returns:
             CodebaseHealth report
         """
-        logger.info("Starting codebase analysis...")
+        start_time = time.time()
 
-        # Run all detectors
-        findings = self._run_detectors()
+        with LogContext(operation="analyze"):
+            logger.info("Starting codebase analysis")
 
-        # Calculate metrics (incorporating detector findings)
-        metrics = self._calculate_metrics(findings)
+            # Run all detectors
+            findings = self._run_detectors()
 
-        # Calculate scores
-        structure_score = self._score_structure(metrics)
-        quality_score = self._score_quality(metrics)
-        architecture_score = self._score_architecture(metrics)
+            # Calculate metrics (incorporating detector findings)
+            metrics = self._calculate_metrics(findings)
 
-        overall_score = (
-            structure_score * self.WEIGHTS["structure"]
-            + quality_score * self.WEIGHTS["quality"]
-            + architecture_score * self.WEIGHTS["architecture"]
-        )
+            # Calculate scores
+            structure_score = self._score_structure(metrics)
+            quality_score = self._score_quality(metrics)
+            architecture_score = self._score_architecture(metrics)
 
-        grade = self._score_to_grade(overall_score)
+            overall_score = (
+                structure_score * self.WEIGHTS["structure"]
+                + quality_score * self.WEIGHTS["quality"]
+                + architecture_score * self.WEIGHTS["architecture"]
+            )
 
-        findings_summary = self._summarize_findings(findings)
+            grade = self._score_to_grade(overall_score)
 
-        return CodebaseHealth(
-            grade=grade,
-            overall_score=overall_score,
-            structure_score=structure_score,
-            quality_score=quality_score,
-            architecture_score=architecture_score,
-            metrics=metrics,
-            findings_summary=findings_summary,
-            findings=findings,
-        )
+            findings_summary = self._summarize_findings(findings)
+
+            duration = time.time() - start_time
+            logger.info("Analysis complete", extra={
+                "grade": grade,
+                "overall_score": round(overall_score, 2),
+                "total_findings": len(findings),
+                "duration_seconds": round(duration, 3)
+            })
+
+            return CodebaseHealth(
+                grade=grade,
+                overall_score=overall_score,
+                structure_score=structure_score,
+                quality_score=quality_score,
+                architecture_score=architecture_score,
+                metrics=metrics,
+                findings_summary=findings_summary,
+                findings=findings,
+            )
 
     def _run_detectors(self) -> List[Finding]:
         """Run all registered detectors.
@@ -97,16 +109,35 @@ class AnalysisEngine:
 
         for detector in self.detectors:
             detector_name = detector.__class__.__name__
-            logger.info(f"Running {detector_name}...")
 
-            try:
-                findings = detector.detect()
-                logger.info(f"  Found {len(findings)} issues")
-                all_findings.extend(findings)
-            except Exception as e:
-                logger.error(f"  Error in {detector_name}: {e}", exc_info=True)
+            with LogContext(detector=detector_name):
+                start_time = time.time()
+                logger.info(f"Running detector: {detector_name}")
 
-        logger.info(f"Total findings: {len(all_findings)}")
+                try:
+                    findings = detector.detect()
+                    duration = time.time() - start_time
+
+                    logger.info(f"Detector complete: {detector_name}", extra={
+                        "findings_count": len(findings),
+                        "duration_seconds": round(duration, 3)
+                    })
+
+                    all_findings.extend(findings)
+
+                except Exception as e:
+                    duration = time.time() - start_time
+                    logger.error(
+                        f"Detector failed: {detector_name}",
+                        extra={"error": str(e), "duration_seconds": round(duration, 3)},
+                        exc_info=True
+                    )
+
+        logger.info("All detectors complete", extra={
+            "total_findings": len(all_findings),
+            "detectors_run": len(self.detectors)
+        })
+
         return all_findings
 
     def _calculate_metrics(self, findings: List[Finding]) -> MetricsBreakdown:

@@ -103,8 +103,7 @@ class DeadCodeDetector(CodeSmellDetector):
           AND NOT (f.name STARTS WITH 'test_')
           AND NOT f.name IN ['main', '__main__', '__init__', 'setUp', 'tearDown']
         OPTIONAL MATCH (file:File)-[:CONTAINS]->(f)
-        OPTIONAL MATCH (f)-[:HAS_DECORATOR]->(decorator)
-        WITH f, file, collect(decorator.name) AS decorators
+        WITH f, file, COALESCE(f.decorators, []) AS decorators
         // Filter out functions with decorators or in __all__
         WHERE size(decorators) = 0
           AND NOT (file.exports IS NOT NULL AND f.name IN file.exports)
@@ -134,6 +133,14 @@ class DeadCodeDetector(CodeSmellDetector):
             # Additional check: filter out common decorator patterns in the name
             # (e.g., handle_event, on_click, etc.)
             if any(pattern in name.lower() for pattern in ["handle", "on_", "callback"]):
+                continue
+
+            # Filter out loader/factory pattern methods (often called dynamically)
+            if any(pattern in name.lower() for pattern in ["load_data", "loader", "_loader"]):
+                continue
+
+            # Filter out parse/process methods that might be called via registry
+            if name.startswith("_parse_") or name.startswith("_process_"):
                 continue
 
             finding_id = str(uuid.uuid4())
@@ -187,8 +194,7 @@ class DeadCodeDetector(CodeSmellDetector):
           AND NOT (c)<-[:USES]-()  // Not used in type hints
         OPTIONAL MATCH (file)-[:CONTAINS]->(m:Function)
         WHERE m.qualifiedName STARTS WITH c.qualifiedName + '.'
-        OPTIONAL MATCH (c)-[:HAS_DECORATOR]->(decorator)
-        WITH c, file, count(m) AS method_count, collect(decorator.name) AS decorators
+        WITH c, file, count(m) AS method_count, COALESCE(c.decorators, []) AS decorators
         // Filter out classes with decorators or in __all__
         WHERE size(decorators) = 0
           AND NOT (file.exports IS NOT NULL AND c.name IN file.exports)
@@ -217,6 +223,10 @@ class DeadCodeDetector(CodeSmellDetector):
 
             # Skip mixin classes (used for multiple inheritance)
             if name.endswith("Mixin") or "Mixin" in name:
+                continue
+
+            # Skip test classes (test classes often have fixtures that aren't "called")
+            if name.startswith("Test") or name.endswith("Test"):
                 continue
 
             finding_id = str(uuid.uuid4())
