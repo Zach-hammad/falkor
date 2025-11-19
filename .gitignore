@@ -57,3 +57,11 @@ Thumbs.db
 # Project specific
 examples/output/
 *.db
+
+# Analysis outputs
+*_analysis.json
+analysis_results.json
+
+# Temporary test files
+test_ingestion.py
+tests/unit/
