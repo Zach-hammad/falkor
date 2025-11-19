@@ -13,6 +13,16 @@ from falkor.graph import Neo4jClient
 from falkor.detectors import AnalysisEngine
 from falkor.logging_config import configure_logging, get_logger, LogContext
 from falkor.config import load_config, FalkorConfig, ConfigError, generate_config_template, load_config_from_env
+from falkor.validation import (
+    ValidationError,
+    validate_repository_path,
+    validate_neo4j_uri,
+    validate_neo4j_credentials,
+    validate_output_path,
+    validate_file_size_limit,
+    validate_batch_size,
+    validate_retry_config,
+)
 
 console = Console()
 logger = get_logger(__name__)
@@ -144,17 +154,49 @@ def ingest(
     # Get config from context
     config: FalkorConfig = ctx.obj['config']
 
-    # Apply config defaults (CLI options override config)
-    final_neo4j_uri = neo4j_uri or config.neo4j.uri
-    final_neo4j_user = neo4j_user or config.neo4j.user
-    final_neo4j_password = neo4j_password or config.neo4j.password
-    final_patterns = list(pattern) if pattern else config.ingestion.patterns
-    final_follow_symlinks = follow_symlinks if follow_symlinks is not None else config.ingestion.follow_symlinks
-    final_max_file_size = max_file_size if max_file_size is not None else config.ingestion.max_file_size_mb
+    # Validate inputs before execution
+    try:
+        # Validate repository path
+        validated_repo_path = validate_repository_path(repo_path)
 
-    # Prompt for password if not provided
-    if not final_neo4j_password:
-        final_neo4j_password = click.prompt("Neo4j password", hide_input=True)
+        # Apply config defaults (CLI options override config)
+        final_neo4j_uri = neo4j_uri or config.neo4j.uri
+        final_neo4j_user = neo4j_user or config.neo4j.user
+        final_neo4j_password = neo4j_password or config.neo4j.password
+        final_patterns = list(pattern) if pattern else config.ingestion.patterns
+        final_follow_symlinks = follow_symlinks if follow_symlinks is not None else config.ingestion.follow_symlinks
+        final_max_file_size = max_file_size if max_file_size is not None else config.ingestion.max_file_size_mb
+
+        # Validate Neo4j URI
+        final_neo4j_uri = validate_neo4j_uri(final_neo4j_uri)
+
+        # Prompt for password if not provided
+        if not final_neo4j_password:
+            final_neo4j_password = click.prompt("Neo4j password", hide_input=True)
+
+        # Validate credentials
+        final_neo4j_user, final_neo4j_password = validate_neo4j_credentials(
+            final_neo4j_user, final_neo4j_password
+        )
+
+        # Validate file size limit
+        final_max_file_size = validate_file_size_limit(final_max_file_size)
+
+        # Validate batch size
+        validated_batch_size = validate_batch_size(config.ingestion.batch_size)
+
+        # Validate retry configuration
+        validated_retries = validate_retry_config(
+            config.neo4j.max_retries,
+            config.neo4j.retry_backoff_factor,
+            config.neo4j.retry_base_delay
+        )
+
+    except ValidationError as e:
+        console.print(f"\n[red]❌ Validation Error:[/red] {e.message}")
+        if e.suggestion:
+            console.print(f"\n[yellow]{e.suggestion}[/yellow]")
+        raise click.Abort()
 
     console.print(f"\n[bold cyan]🐉 Falkor Ingestion[/bold cyan]\n")
     console.print(f"Repository: {repo_path}")
@@ -170,16 +212,16 @@ def ingest(
                 final_neo4j_uri,
                 final_neo4j_user,
                 final_neo4j_password,
-                max_retries=config.neo4j.max_retries,
-                retry_backoff_factor=config.neo4j.retry_backoff_factor,
-                retry_base_delay=config.neo4j.retry_base_delay,
+                max_retries=validated_retries[0],
+                retry_backoff_factor=validated_retries[1],
+                retry_base_delay=validated_retries[2],
             ) as db:
                 pipeline = IngestionPipeline(
-                    repo_path,
+                    str(validated_repo_path),
                     db,
                     follow_symlinks=final_follow_symlinks,
                     max_file_size_mb=final_max_file_size,
-                    batch_size=config.ingestion.batch_size
+                    batch_size=validated_batch_size
                 )
                 pipeline.ingest(patterns=final_patterns)
 
@@ -240,14 +282,45 @@ def analyze(
     # Get config from context
     config: FalkorConfig = ctx.obj['config']
 
-    # Apply config defaults (CLI options override config)
-    final_neo4j_uri = neo4j_uri or config.neo4j.uri
-    final_neo4j_user = neo4j_user or config.neo4j.user
-    final_neo4j_password = neo4j_password or config.neo4j.password
+    # Validate inputs before execution
+    try:
+        # Validate repository path
+        validated_repo_path = validate_repository_path(repo_path)
 
-    # Prompt for password if not provided
-    if not final_neo4j_password:
-        final_neo4j_password = click.prompt("Neo4j password", hide_input=True)
+        # Apply config defaults (CLI options override config)
+        final_neo4j_uri = neo4j_uri or config.neo4j.uri
+        final_neo4j_user = neo4j_user or config.neo4j.user
+        final_neo4j_password = neo4j_password or config.neo4j.password
+
+        # Validate Neo4j URI
+        final_neo4j_uri = validate_neo4j_uri(final_neo4j_uri)
+
+        # Prompt for password if not provided
+        if not final_neo4j_password:
+            final_neo4j_password = click.prompt("Neo4j password", hide_input=True)
+
+        # Validate credentials
+        final_neo4j_user, final_neo4j_password = validate_neo4j_credentials(
+            final_neo4j_user, final_neo4j_password
+        )
+
+        # Validate output path if provided
+        validated_output = None
+        if output:
+            validated_output = validate_output_path(output)
+
+        # Validate retry configuration
+        validated_retries = validate_retry_config(
+            config.neo4j.max_retries,
+            config.neo4j.retry_backoff_factor,
+            config.neo4j.retry_base_delay
+        )
+
+    except ValidationError as e:
+        console.print(f"\n[red]❌ Validation Error:[/red] {e.message}")
+        if e.suggestion:
+            console.print(f"\n[yellow]{e.suggestion}[/yellow]")
+        raise click.Abort()
 
     console.print(f"\n[bold cyan]🐉 Falkor Analysis[/bold cyan]\n")
 
@@ -259,9 +332,9 @@ def analyze(
                 final_neo4j_uri,
                 final_neo4j_user,
                 final_neo4j_password,
-                max_retries=config.neo4j.max_retries,
-                retry_backoff_factor=config.neo4j.retry_backoff_factor,
-                retry_base_delay=config.neo4j.retry_base_delay,
+                max_retries=validated_retries[0],
+                retry_backoff_factor=validated_retries[1],
+                retry_base_delay=validated_retries[2],
             ) as db:
                 # Convert detector config to dict for detectors
                 detector_config_dict = asdict(config.detectors)
@@ -278,13 +351,13 @@ def analyze(
                 _display_health_report(health)
 
                 # Save to file if requested
-                if output:
+                if validated_output:
                     import json
 
-                    with open(output, "w") as f:
+                    with open(validated_output, "w") as f:
                         json.dump(health.to_dict(), f, indent=2)
-                    logger.info(f"Report saved to {output}")
-                    console.print(f"\n✅ Report saved to {output}")
+                    logger.info(f"Report saved to {validated_output}")
+                    console.print(f"\n✅ Report saved to {validated_output}")
 
     except Exception as e:
         logger.exception("Error during analysis")
