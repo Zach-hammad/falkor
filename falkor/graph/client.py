@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 from neo4j import GraphDatabase, Driver, Result
 import logging
 
-from falkor.models import Entity, Relationship
+from falkor.models import Entity, Relationship, NodeType, RelationshipType
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,9 @@ class Neo4jClient:
         Returns:
             Node ID
         """
+        # SECURITY: entity.node_type.value is from NodeType enum - safe for f-string
+        assert isinstance(entity.node_type, NodeType), "node_type must be NodeType enum"
+
         query = f"""
         CREATE (n:{entity.node_type.value} {{
             name: $name,
@@ -94,6 +97,9 @@ class Neo4jClient:
         Args:
             rel: Relationship to create
         """
+        # SECURITY: rel.rel_type.value is from RelationshipType enum - safe for f-string
+        assert isinstance(rel.rel_type, RelationshipType), "rel_type must be RelationshipType enum"
+
         # Try to find source by elementId, target by elementId or qualifiedName
         query = f"""
         MATCH (source)
@@ -138,6 +144,10 @@ class Neo4jClient:
         id_mapping: Dict[str, str] = {}
 
         for node_type, entities_of_type in by_type.items():
+            # SECURITY: node_type is from NodeType enum value - safe for f-string
+            # Validate it's a valid node type string
+            assert node_type in [nt.value for nt in NodeType], f"Invalid node type: {node_type}"
+
             query = f"""
             UNWIND $entities AS entity
             CREATE (n:{node_type})
@@ -163,6 +173,60 @@ class Neo4jClient:
 
         logger.info(f"Created {len(id_mapping)} nodes")
         return id_mapping
+
+    def batch_create_relationships(self, relationships: List[Relationship]) -> int:
+        """Create multiple relationships in a single transaction.
+
+        Args:
+            relationships: List of relationships to create
+
+        Returns:
+            Number of relationships created
+        """
+        if not relationships:
+            return 0
+
+        # Group relationships by type for efficient batch creation
+        by_type: Dict[str, List[Relationship]] = {}
+        for rel in relationships:
+            # SECURITY: rel.rel_type.value is from RelationshipType enum
+            assert isinstance(rel.rel_type, RelationshipType), "rel_type must be RelationshipType enum"
+            rel_type = rel.rel_type.value
+            if rel_type not in by_type:
+                by_type[rel_type] = []
+            by_type[rel_type].append(rel)
+
+        total_created = 0
+
+        for rel_type, rels_of_type in by_type.items():
+            # Build list of relationship data
+            rel_data = [
+                {
+                    "source_id": r.source_id,
+                    "target_id": r.target_id,
+                    "target_qualified_name": r.target_id,
+                    "target_name": r.target_id.split(".")[-1] if "." in r.target_id else r.target_id,
+                    "properties": r.properties,
+                }
+                for r in rels_of_type
+            ]
+
+            # SECURITY: rel_type validated above via assertion
+            query = f"""
+            UNWIND $rels AS rel
+            MATCH (source)
+            WHERE elementId(source) = rel.source_id
+            MERGE (target {{qualifiedName: rel.target_qualified_name}})
+            ON CREATE SET target.name = rel.target_name, target.external = true
+            CREATE (source)-[r:{rel_type}]->(target)
+            SET r = rel.properties
+            """
+
+            self.execute_query(query, {"rels": rel_data})
+            total_created += len(rels_of_type)
+
+        logger.info(f"Batch created {total_created} relationships")
+        return total_created
 
     def clear_graph(self) -> None:
         """Delete all nodes and relationships. Use with caution!"""

@@ -59,25 +59,41 @@ class GraphSchema:
 
     def drop_all(self) -> None:
         """Drop all constraints and indexes. Use with caution!"""
+        import re
+
+        # Validate name is safe (alphanumeric, underscore, hyphen only)
+        def is_safe_name(name: str) -> bool:
+            return bool(re.match(r'^[a-zA-Z0-9_-]+$', name))
+
         # Drop all constraints
         drop_constraints_query = """
         SHOW CONSTRAINTS
         YIELD name
-        RETURN 'DROP CONSTRAINT ' + name AS query
+        RETURN name
         """
         constraints = self.client.execute_query(drop_constraints_query)
         for record in constraints:
-            self.client.execute_query(record["query"])
+            name = record["name"]
+            if is_safe_name(name):
+                # Safe to use f-string since we validated the name
+                self.client.execute_query(f"DROP CONSTRAINT {name}")
+            else:
+                print(f"Warning: Skipping constraint with unsafe name: {name}")
 
         # Drop all indexes
         drop_indexes_query = """
         SHOW INDEXES
         YIELD name
         WHERE name <> 'node_label_index' AND name <> 'relationship_type_index'
-        RETURN 'DROP INDEX ' + name AS query
+        RETURN name
         """
         indexes = self.client.execute_query(drop_indexes_query)
         for record in indexes:
-            self.client.execute_query(record["query"])
+            name = record["name"]
+            if is_safe_name(name):
+                # Safe to use f-string since we validated the name
+                self.client.execute_query(f"DROP INDEX {name}")
+            else:
+                print(f"Warning: Skipping index with unsafe name: {name}")
 
         print("Schema dropped!")

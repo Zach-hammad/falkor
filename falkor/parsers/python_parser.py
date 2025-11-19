@@ -148,6 +148,9 @@ class PythonParser(CodeParser):
         # Extract function calls - need to track which function makes each call
         self._extract_calls(tree, file_path, entity_map, relationships)
 
+        # Extract class inheritance relationships
+        self._extract_inheritance(tree, file_path, relationships)
+
         # Create CONTAINS relationships
         file_qualified_name = file_path
         for entity in entities:
@@ -437,3 +440,83 @@ class PythonParser(CodeParser):
                     properties={"line": line, "call_name": callee},
                 )
             )
+
+    def _extract_inheritance(
+        self,
+        tree: ast.AST,
+        file_path: str,
+        relationships: List[Relationship],
+    ) -> None:
+        """Extract class inheritance relationships from AST.
+
+        Args:
+            tree: Python AST
+            file_path: Path to source file
+            relationships: List to append relationships to
+        """
+        # Build a set of class names defined in this file
+        local_classes = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                local_classes.add(node.name)
+
+        # Now extract inheritance relationships
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                child_class_qualified = f"{file_path}::{node.name}"
+
+                # Extract base classes
+                for base in node.bases:
+                    # Try to get the base class name
+                    base_name = self._get_base_class_name(base)
+                    if base_name:
+                        # Determine the target qualified name
+                        # If base class is defined in this file, use file-qualified name
+                        # Otherwise, use the name as-is (could be simple or module.Class)
+                        if base_name in local_classes:
+                            # Intra-file inheritance
+                            base_qualified = f"{file_path}::{base_name}"
+                        else:
+                            # Imported or external base class
+                            # Use the name as extracted (e.g., "ABC", "typing.Generic", etc.)
+                            base_qualified = base_name
+
+                        relationships.append(
+                            Relationship(
+                                source_id=child_class_qualified,
+                                target_id=base_qualified,
+                                rel_type=RelationshipType.INHERITS,
+                                properties={
+                                    "base_class": base_name,
+                                    "line": node.lineno,
+                                },
+                            )
+                        )
+
+    def _get_base_class_name(self, node: ast.expr) -> Optional[str]:
+        """Extract base class name from AST node.
+
+        Args:
+            node: AST expression node representing base class
+
+        Returns:
+            Base class name or None
+        """
+        if isinstance(node, ast.Name):
+            # Simple inheritance: class Foo(Bar)
+            return node.id
+        elif isinstance(node, ast.Attribute):
+            # Qualified inheritance: class Foo(module.Bar)
+            parts = []
+            current = node
+            while isinstance(current, ast.Attribute):
+                parts.append(current.attr)
+                current = current.value
+            if isinstance(current, ast.Name):
+                parts.append(current.id)
+            return ".".join(reversed(parts))
+        elif isinstance(node, ast.Subscript):
+            # Generic inheritance: class Foo(Generic[T])
+            # Extract the base type without the subscript
+            return self._get_base_class_name(node.value)
+        return None

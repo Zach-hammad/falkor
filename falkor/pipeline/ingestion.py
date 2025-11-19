@@ -109,6 +109,7 @@ class IngestionPipeline:
             logger.info(f"Created {len(id_mapping)} nodes")
 
             # Convert relationships to use elementId (create new objects to avoid mutation)
+            resolved_rels = []
             for rel in relationships:
                 # Map qualified_name to elementId
                 source_id = id_mapping.get(rel.source_id, rel.source_id)
@@ -121,9 +122,10 @@ class IngestionPipeline:
                     rel_type=rel.rel_type,
                     properties=rel.properties,
                 )
+                resolved_rels.append(resolved_rel)
 
-                self.db.create_relationship(resolved_rel)
-
+            # Batch create all relationships at once
+            self.db.batch_create_relationships(resolved_rels)
             logger.info(f"Created {len(relationships)} relationships")
 
         except Exception as e:
