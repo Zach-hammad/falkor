@@ -11,7 +11,7 @@ from falkor.pipeline import IngestionPipeline
 from falkor.graph import Neo4jClient
 from falkor.detectors import AnalysisEngine
 from falkor.logging_config import configure_logging, get_logger, LogContext
-from falkor.config import load_config, FalkorConfig, ConfigError, generate_config_template
+from falkor.config import load_config, FalkorConfig, ConfigError, generate_config_template, load_config_from_env
 
 console = Console()
 logger = get_logger(__name__)
@@ -347,6 +347,91 @@ def _display_health_report(health) -> None:
             findings_table.add_row("[blue]Low[/blue]", str(fs.low))
 
         console.print(findings_table)
+
+
+@cli.command()
+@click.option(
+    "--format",
+    "-f",
+    type=click.Choice(["yaml", "json", "table"], case_sensitive=False),
+    default="table",
+    help="Output format (default: table)",
+)
+@click.pass_context
+def show_config(ctx: click.Context, format: str) -> None:
+    """Display effective configuration from all sources.
+
+    Shows the final configuration after applying the priority chain:
+    1. Command-line arguments (highest priority)
+    2. Environment variables (FALKOR_*)
+    3. Config file (.falkorrc, falkor.toml)
+    4. Built-in defaults (lowest priority)
+
+    Use --format to control output format:
+    - table: Pretty-printed table (default)
+    - json: JSON format
+    - yaml: YAML format (requires PyYAML)
+    """
+    console.print("\n[bold cyan]🐉 Falkor Configuration[/bold cyan]\n")
+
+    # Get config from context
+    config: FalkorConfig = ctx.obj['config']
+
+    if format == "json":
+        import json
+        console.print(json.dumps(config.to_dict(), indent=2))
+
+    elif format == "yaml":
+        try:
+            import yaml
+            console.print(yaml.dump(config.to_dict(), default_flow_style=False, sort_keys=False))
+        except ImportError:
+            console.print("[red]Error: PyYAML not installed. Use 'pip install pyyaml'[/red]")
+            raise click.Abort()
+
+    else:  # table format
+        # Neo4j configuration
+        neo4j_table = Table(title="Neo4j Configuration")
+        neo4j_table.add_column("Setting", style="cyan")
+        neo4j_table.add_column("Value", style="green")
+        neo4j_table.add_row("URI", config.neo4j.uri)
+        neo4j_table.add_row("User", config.neo4j.user)
+        neo4j_table.add_row("Password", "***" if config.neo4j.password else "[dim]not set[/dim]")
+        console.print(neo4j_table)
+
+        # Ingestion configuration
+        ingestion_table = Table(title="Ingestion Configuration")
+        ingestion_table.add_column("Setting", style="cyan")
+        ingestion_table.add_column("Value", style="green")
+        ingestion_table.add_row("Patterns", ", ".join(config.ingestion.patterns))
+        ingestion_table.add_row("Follow Symlinks", str(config.ingestion.follow_symlinks))
+        ingestion_table.add_row("Max File Size (MB)", str(config.ingestion.max_file_size_mb))
+        ingestion_table.add_row("Batch Size", str(config.ingestion.batch_size))
+        console.print(ingestion_table)
+
+        # Analysis configuration
+        analysis_table = Table(title="Analysis Configuration")
+        analysis_table.add_column("Setting", style="cyan")
+        analysis_table.add_column("Value", style="green")
+        analysis_table.add_row("Min Modularity", str(config.analysis.min_modularity))
+        analysis_table.add_row("Max Coupling", str(config.analysis.max_coupling))
+        console.print(analysis_table)
+
+        # Logging configuration
+        logging_table = Table(title="Logging Configuration")
+        logging_table.add_column("Setting", style="cyan")
+        logging_table.add_column("Value", style="green")
+        logging_table.add_row("Level", config.logging.level)
+        logging_table.add_row("Format", config.logging.format)
+        logging_table.add_row("File", config.logging.file or "[dim]none[/dim]")
+        console.print(logging_table)
+
+        # Show configuration sources
+        console.print("\n[bold]Configuration Priority:[/bold]")
+        console.print("  1. Command-line arguments (highest)")
+        console.print("  2. Environment variables (FALKOR_*)")
+        console.print("  3. Config file (.falkorrc, falkor.toml)")
+        console.print("  4. Built-in defaults (lowest)\n")
 
 
 @cli.command()

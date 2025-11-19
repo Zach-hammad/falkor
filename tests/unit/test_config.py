@@ -17,6 +17,7 @@ from falkor.config import (
     load_config_file,
     find_config_file,
     load_config,
+    load_config_from_env,
     generate_config_template,
     _expand_env_vars,
 )
@@ -434,3 +435,197 @@ class TestGenerateConfigTemplate:
         """Test error with invalid format."""
         with pytest.raises(ValueError, match="Unsupported format"):
             generate_config_template(format="xml")
+
+
+class TestEnvironmentVariableLoading:
+    """Test loading configuration from environment variables."""
+
+    def test_load_from_env_neo4j(self):
+        """Test loading Neo4j config from environment."""
+        with patch.dict("os.environ", {
+            "FALKOR_NEO4J_URI": "bolt://prod:7687",
+            "FALKOR_NEO4J_USER": "admin",
+            "FALKOR_NEO4J_PASSWORD": "secret123",
+        }):
+            data = load_config_from_env()
+
+            assert data["neo4j"]["uri"] == "bolt://prod:7687"
+            assert data["neo4j"]["user"] == "admin"
+            assert data["neo4j"]["password"] == "secret123"
+
+    def test_load_from_env_ingestion(self):
+        """Test loading ingestion config from environment."""
+        with patch.dict("os.environ", {
+            "FALKOR_INGESTION_PATTERNS": "**/*.py,**/*.js,**/*.ts",
+            "FALKOR_INGESTION_FOLLOW_SYMLINKS": "true",
+            "FALKOR_INGESTION_MAX_FILE_SIZE_MB": "20.5",
+            "FALKOR_INGESTION_BATCH_SIZE": "200",
+        }):
+            data = load_config_from_env()
+
+            assert data["ingestion"]["patterns"] == ["**/*.py", "**/*.js", "**/*.ts"]
+            assert data["ingestion"]["follow_symlinks"] is True
+            assert data["ingestion"]["max_file_size_mb"] == 20.5
+            assert data["ingestion"]["batch_size"] == 200
+
+    def test_load_from_env_logging(self):
+        """Test loading logging config from environment."""
+        with patch.dict("os.environ", {
+            "FALKOR_LOG_LEVEL": "debug",
+            "FALKOR_LOG_FORMAT": "json",
+            "FALKOR_LOG_FILE": "logs/test.log",
+        }):
+            data = load_config_from_env()
+
+            assert data["logging"]["level"] == "DEBUG"
+            assert data["logging"]["format"] == "json"
+            assert data["logging"]["file"] == "logs/test.log"
+
+    def test_load_from_env_logging_unprefixed(self):
+        """Test loading logging config from unprefixed env vars."""
+        with patch.dict("os.environ", {
+            "LOG_LEVEL": "warning",
+            "LOG_FORMAT": "json",
+            "LOG_FILE": "app.log",
+        }):
+            data = load_config_from_env()
+
+            assert data["logging"]["level"] == "WARNING"
+            assert data["logging"]["format"] == "json"
+            assert data["logging"]["file"] == "app.log"
+
+    def test_load_from_env_logging_prefix_takes_precedence(self):
+        """Test that FALKOR_ prefix takes precedence over unprefixed."""
+        with patch.dict("os.environ", {
+            "FALKOR_LOG_LEVEL": "debug",
+            "LOG_LEVEL": "info",
+        }):
+            data = load_config_from_env()
+            assert data["logging"]["level"] == "DEBUG"
+
+    def test_load_from_env_invalid_numbers(self):
+        """Test handling of invalid numeric values."""
+        with patch.dict("os.environ", {
+            "FALKOR_INGESTION_MAX_FILE_SIZE_MB": "not_a_number",
+            "FALKOR_INGESTION_BATCH_SIZE": "invalid",
+        }):
+            data = load_config_from_env()
+            # Should not include invalid values
+            assert "max_file_size_mb" not in data.get("ingestion", {})
+            assert "batch_size" not in data.get("ingestion", {})
+
+    def test_load_from_env_empty(self):
+        """Test loading with no environment variables set."""
+        with patch.dict("os.environ", {}, clear=True):
+            data = load_config_from_env()
+            assert data == {}
+
+
+class TestFallbackChain:
+    """Test configuration fallback chain."""
+
+    def test_fallback_defaults_only(self):
+        """Test config with only defaults."""
+        temp_dir = tempfile.mkdtemp()
+
+        try:
+            with patch.dict("os.environ", {}, clear=True):
+                config = load_config(search_path=Path(temp_dir))
+
+                # Should have defaults
+                assert config.neo4j.uri == "bolt://localhost:7687"
+                assert config.neo4j.user == "neo4j"
+                assert config.ingestion.patterns == ["**/*.py"]
+        finally:
+            import shutil
+            shutil.rmtree(temp_dir)
+
+    def test_fallback_file_overrides_defaults(self):
+        """Test config file overrides defaults."""
+        temp_dir = tempfile.mkdtemp()
+        config_path = Path(temp_dir) / ".falkorrc"
+        config_path.write_text('{"neo4j": {"uri": "bolt://file:7687"}}')
+
+        try:
+            with patch.dict("os.environ", {}, clear=True):
+                config = load_config(search_path=Path(temp_dir))
+
+                # File value should override default
+                assert config.neo4j.uri == "bolt://file:7687"
+                # Default should still be present
+                assert config.neo4j.user == "neo4j"
+        finally:
+            import shutil
+            shutil.rmtree(temp_dir)
+
+    def test_fallback_env_overrides_file(self):
+        """Test environment variables override config file."""
+        temp_dir = tempfile.mkdtemp()
+        config_path = Path(temp_dir) / ".falkorrc"
+        config_path.write_text('{"neo4j": {"uri": "bolt://file:7687"}}')
+
+        try:
+            with patch.dict("os.environ", {"FALKOR_NEO4J_URI": "bolt://env:7687"}):
+                config = load_config(search_path=Path(temp_dir))
+
+                # Env value should override file
+                assert config.neo4j.uri == "bolt://env:7687"
+        finally:
+            import shutil
+            shutil.rmtree(temp_dir)
+
+    def test_fallback_chain_complete(self):
+        """Test complete fallback chain."""
+        temp_dir = tempfile.mkdtemp()
+        config_path = Path(temp_dir) / ".falkorrc"
+        config_path.write_text(json.dumps({
+            "neo4j": {"uri": "bolt://file:7687", "user": "file_user"},
+            "ingestion": {"patterns": ["**/*.py", "**/*.js"]},
+        }))
+
+        try:
+            with patch.dict("os.environ", {
+                "FALKOR_NEO4J_URI": "bolt://env:7687",
+                "FALKOR_INGESTION_BATCH_SIZE": "150",
+            }):
+                config = load_config(search_path=Path(temp_dir))
+
+                # Env var overrides file
+                assert config.neo4j.uri == "bolt://env:7687"
+
+                # File overrides default
+                assert config.neo4j.user == "file_user"
+                assert config.ingestion.patterns == ["**/*.py", "**/*.js"]
+
+                # Env var provides new value
+                assert config.ingestion.batch_size == 150
+
+                # Default remains
+                assert config.ingestion.follow_symlinks is False
+        finally:
+            import shutil
+            shutil.rmtree(temp_dir)
+
+    def test_fallback_disable_env(self):
+        """Test disabling environment variable loading."""
+        with patch.dict("os.environ", {"FALKOR_NEO4J_URI": "bolt://env:7687"}):
+            config = load_config(use_env=False)
+
+            # Should not load from env
+            assert config.neo4j.uri == "bolt://localhost:7687"  # default
+
+    def test_fallback_chain_with_expansion(self):
+        """Test that environment variable expansion works in config files."""
+        temp_dir = tempfile.mkdtemp()
+        config_path = Path(temp_dir) / ".falkorrc"
+        config_path.write_text('{"neo4j": {"password": "${NEO4J_PASSWORD}"}}')
+
+        try:
+            with patch.dict("os.environ", {"NEO4J_PASSWORD": "expanded_secret"}):
+                config = load_config(search_path=Path(temp_dir))
+
+                # ${VAR} should be expanded
+                assert config.neo4j.password == "expanded_secret"
+        finally:
+            import shutil
+            shutil.rmtree(temp_dir)

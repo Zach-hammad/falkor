@@ -1,13 +1,29 @@
 """Configuration management for Falkor.
 
-Supports loading configuration from:
-- .falkorrc (YAML or JSON format)
-- falkor.toml (TOML format)
+Configuration Priority Chain (highest to lowest):
+1. Command-line arguments (--neo4j-uri, --log-level, etc.)
+2. Environment variables (FALKOR_NEO4J_URI, FALKOR_NEO4J_USER, etc.)
+3. Config file (.falkorrc, falkor.toml)
+4. Built-in defaults
 
-Configuration is searched hierarchically:
+Config files are searched hierarchically:
 1. Current directory
 2. Parent directories (up to root)
 3. User home directory (~/.falkorrc or ~/.config/falkor.toml)
+
+Environment Variable Names:
+- FALKOR_NEO4J_URI
+- FALKOR_NEO4J_USER
+- FALKOR_NEO4J_PASSWORD
+- FALKOR_INGESTION_PATTERNS (comma-separated)
+- FALKOR_INGESTION_FOLLOW_SYMLINKS (true/false)
+- FALKOR_INGESTION_MAX_FILE_SIZE_MB
+- FALKOR_INGESTION_BATCH_SIZE
+- FALKOR_ANALYSIS_MIN_MODULARITY
+- FALKOR_ANALYSIS_MAX_COUPLING
+- FALKOR_LOG_LEVEL (or LOG_LEVEL)
+- FALKOR_LOG_FORMAT (or LOG_FORMAT)
+- FALKOR_LOG_FILE (or LOG_FILE)
 
 Example .falkorrc (YAML):
 ```yaml
@@ -359,43 +375,150 @@ def load_config_file(file_path: Path) -> Dict[str, Any]:
         raise ConfigError(f"Unsupported config file format: {file_path}")
 
 
+def load_config_from_env() -> Dict[str, Any]:
+    """Load configuration from environment variables.
+
+    Environment variables take precedence over config files but are
+    overridden by command-line arguments.
+
+    Returns:
+        Configuration dictionary with values from environment
+    """
+    config = {}
+
+    # Neo4j configuration
+    neo4j = {}
+    if uri := os.getenv("FALKOR_NEO4J_URI"):
+        neo4j["uri"] = uri
+    if user := os.getenv("FALKOR_NEO4J_USER"):
+        neo4j["user"] = user
+    if password := os.getenv("FALKOR_NEO4J_PASSWORD"):
+        neo4j["password"] = password
+    if neo4j:
+        config["neo4j"] = neo4j
+
+    # Ingestion configuration
+    ingestion = {}
+    if patterns := os.getenv("FALKOR_INGESTION_PATTERNS"):
+        ingestion["patterns"] = [p.strip() for p in patterns.split(",")]
+    if follow_symlinks := os.getenv("FALKOR_INGESTION_FOLLOW_SYMLINKS"):
+        ingestion["follow_symlinks"] = follow_symlinks.lower() in ("true", "1", "yes")
+    if max_file_size := os.getenv("FALKOR_INGESTION_MAX_FILE_SIZE_MB"):
+        try:
+            ingestion["max_file_size_mb"] = float(max_file_size)
+        except ValueError:
+            logger.warning(f"Invalid FALKOR_INGESTION_MAX_FILE_SIZE_MB: {max_file_size}")
+    if batch_size := os.getenv("FALKOR_INGESTION_BATCH_SIZE"):
+        try:
+            ingestion["batch_size"] = int(batch_size)
+        except ValueError:
+            logger.warning(f"Invalid FALKOR_INGESTION_BATCH_SIZE: {batch_size}")
+    if ingestion:
+        config["ingestion"] = ingestion
+
+    # Analysis configuration
+    analysis = {}
+    if min_modularity := os.getenv("FALKOR_ANALYSIS_MIN_MODULARITY"):
+        try:
+            analysis["min_modularity"] = float(min_modularity)
+        except ValueError:
+            logger.warning(f"Invalid FALKOR_ANALYSIS_MIN_MODULARITY: {min_modularity}")
+    if max_coupling := os.getenv("FALKOR_ANALYSIS_MAX_COUPLING"):
+        try:
+            analysis["max_coupling"] = float(max_coupling)
+        except ValueError:
+            logger.warning(f"Invalid FALKOR_ANALYSIS_MAX_COUPLING: {max_coupling}")
+    if analysis:
+        config["analysis"] = analysis
+
+    # Logging configuration (support both FALKOR_ prefix and unprefixed)
+    logging_cfg = {}
+    if level := os.getenv("FALKOR_LOG_LEVEL") or os.getenv("LOG_LEVEL"):
+        logging_cfg["level"] = level.upper()
+    if format := os.getenv("FALKOR_LOG_FORMAT") or os.getenv("LOG_FORMAT"):
+        logging_cfg["format"] = format
+    if file := os.getenv("FALKOR_LOG_FILE") or os.getenv("LOG_FILE"):
+        logging_cfg["file"] = file
+    if logging_cfg:
+        config["logging"] = logging_cfg
+
+    return config
+
+
+def _deep_merge_dicts(base: Dict, override: Dict) -> Dict:
+    """Deep merge two dictionaries.
+
+    Args:
+        base: Base dictionary
+        override: Dictionary with overriding values
+
+    Returns:
+        Merged dictionary (base is not modified)
+    """
+    result = base.copy()
+
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge_dicts(result[key], value)
+        else:
+            result[key] = value
+
+    return result
+
+
 def load_config(
     config_file: Optional[Union[str, Path]] = None,
     search_path: Optional[Path] = None,
+    use_env: bool = True,
 ) -> FalkorConfig:
-    """Load Falkor configuration.
+    """Load Falkor configuration with fallback chain.
 
-    If config_file is specified, loads from that file.
-    Otherwise, searches hierarchically for config file.
+    Priority order (highest to lowest):
+    1. Command-line arguments (handled by CLI)
+    2. Environment variables (FALKOR_*)
+    3. Config file (.falkorrc, falkor.toml)
+    4. Built-in defaults
 
     Args:
         config_file: Explicit path to config file (optional)
         search_path: Starting directory for hierarchical search (default: current dir)
+        use_env: Whether to load from environment variables (default: True)
 
     Returns:
-        FalkorConfig instance
+        FalkorConfig instance with merged configuration
 
     Raises:
         ConfigError: If specified config file cannot be loaded
     """
+    # Start with empty dict (defaults will be applied by FalkorConfig.from_dict)
+    merged_data: Dict[str, Any] = {}
+
+    # Layer 3: Load from config file if available
     if config_file:
         # Explicit config file specified
         config_path = Path(config_file)
-        data = load_config_file(config_path)
+        file_data = load_config_file(config_path)
         logger.info(f"Loaded configuration from {config_path}")
-        return FalkorConfig.from_dict(data)
+        merged_data = _deep_merge_dicts(merged_data, file_data)
+    else:
+        # Search for config file
+        config_path = find_config_file(search_path)
+        if config_path:
+            file_data = load_config_file(config_path)
+            logger.info(f"Loaded configuration from {config_path}")
+            merged_data = _deep_merge_dicts(merged_data, file_data)
+        else:
+            logger.debug("No config file found")
 
-    # Search for config file
-    config_path = find_config_file(search_path)
+    # Layer 2: Load from environment variables
+    if use_env:
+        env_data = load_config_from_env()
+        if env_data:
+            logger.debug(f"Loaded configuration from environment variables")
+            merged_data = _deep_merge_dicts(merged_data, env_data)
 
-    if config_path:
-        data = load_config_file(config_path)
-        logger.info(f"Loaded configuration from {config_path}")
-        return FalkorConfig.from_dict(data)
-
-    # No config file found, use defaults
-    logger.info("No config file found, using defaults")
-    return FalkorConfig()
+    # Create final config from merged data (applies defaults for missing values)
+    return FalkorConfig.from_dict(merged_data)
 
 
 def generate_config_template(format: str = "yaml") -> str:
