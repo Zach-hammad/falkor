@@ -88,8 +88,8 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = [
-    "--cov=falkor",
-    "--cov-report=term-missing",
-    "--cov-report=html",
-]
+# addopts = [
+#     "--cov=falkor",
+#     "--cov-report=term-missing",
+#     "--cov-report=html",
+# ]
