@@ -8,6 +8,11 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
+from rich.tree import Tree
+from rich.syntax import Syntax
+from rich.layout import Layout
+from rich.text import Text
+from rich import box
 
 from falkor.pipeline import IngestionPipeline
 from falkor.graph import Neo4jClient
@@ -435,26 +440,63 @@ def analyze(
 
 
 def _display_health_report(health) -> None:
-    """Display health report in terminal."""
-    # Overall grade
+    """Display health report in terminal with enhanced formatting."""
+    from falkor.models import Severity
+
+    # Severity color mapping
+    SEVERITY_COLORS = {
+        Severity.CRITICAL: "bright_red",
+        Severity.HIGH: "red",
+        Severity.MEDIUM: "yellow",
+        Severity.LOW: "blue",
+        Severity.INFO: "cyan",
+    }
+
+    SEVERITY_EMOJI = {
+        Severity.CRITICAL: "🔴",
+        Severity.HIGH: "🟠",
+        Severity.MEDIUM: "🟡",
+        Severity.LOW: "🔵",
+        Severity.INFO: "ℹ️",
+    }
+
+    # Grade color mapping
     grade_colors = {"A": "green", "B": "cyan", "C": "yellow", "D": "bright_red", "F": "red"}
     grade_color = grade_colors.get(health.grade, "white")
 
+    # Overall health panel with enhanced layout
+    grade_text = Text()
+    grade_text.append("Grade: ", style="bold")
+    grade_text.append(health.grade, style=f"bold {grade_color}")
+    grade_text.append(f"\nScore: {health.overall_score:.1f}/100", style="dim")
+
+    # Add grade explanation
+    grade_explanations = {
+        "A": "Excellent - Code is well-structured and maintainable",
+        "B": "Good - Minor improvements recommended",
+        "C": "Fair - Several issues should be addressed",
+        "D": "Poor - Significant refactoring needed",
+        "F": "Critical - Major technical debt present"
+    }
+    grade_text.append(f"\n{grade_explanations.get(health.grade, '')}", style="italic dim")
+
     console.print(
         Panel(
-            f"[bold {grade_color}]Grade: {health.grade}[/bold {grade_color}]\n"
-            f"Score: {health.overall_score:.1f}/100",
-            title="Overall Health",
+            grade_text,
+            title="🐉 Falkor Health Report",
             border_style=grade_color,
+            box=box.DOUBLE,
+            padding=(1, 2),
         )
     )
 
-    # Category scores
-    scores_table = Table(title="Category Scores")
-    scores_table.add_column("Category", style="cyan")
-    scores_table.add_column("Weight", style="dim")
-    scores_table.add_column("Score", style="green")
-    scores_table.add_column("Progress", style="blue")
+    # Category scores with enhanced visuals
+    scores_table = Table(title="📊 Category Scores", box=box.ROUNDED, show_header=True, header_style="bold magenta")
+    scores_table.add_column("Category", style="cyan", no_wrap=True)
+    scores_table.add_column("Weight", style="dim", justify="center")
+    scores_table.add_column("Score", style="bold", justify="right")
+    scores_table.add_column("Progress", justify="center", no_wrap=True)
+    scores_table.add_column("Status", justify="center")
 
     categories = [
         ("Graph Structure", "40%", health.structure_score),
@@ -463,50 +505,145 @@ def _display_health_report(health) -> None:
     ]
 
     for name, weight, score in categories:
-        progress = "█" * int(score / 10) + "░" * (10 - int(score / 10))
-        scores_table.add_row(name, weight, f"{score:.1f}/100", progress)
+        # Enhanced progress bar with color
+        bar_length = 20
+        filled = int((score / 100) * bar_length)
+        bar_color = "green" if score >= 80 else "yellow" if score >= 60 else "red"
+        progress_bar = f"[{bar_color}]{'█' * filled}{'░' * (bar_length - filled)}[/{bar_color}]"
+
+        # Score color based on value
+        score_color = "green" if score >= 80 else "yellow" if score >= 60 else "red"
+        score_text = f"[{score_color}]{score:.1f}/100[/{score_color}]"
+
+        # Status emoji
+        status = "✅" if score >= 80 else "⚠️" if score >= 60 else "❌"
+
+        scores_table.add_row(name, weight, score_text, progress_bar, status)
 
     console.print(scores_table)
 
-    # Key metrics
+    # Key metrics with better organization
     m = health.metrics
-    metrics_table = Table(title="Key Metrics")
-    metrics_table.add_column("Metric", style="cyan")
-    metrics_table.add_column("Value", style="green")
-    metrics_table.add_column("Status", style="yellow")
+    metrics_table = Table(title="📈 Key Metrics", box=box.ROUNDED, show_header=True, header_style="bold cyan")
+    metrics_table.add_column("Metric", style="cyan", no_wrap=True)
+    metrics_table.add_column("Value", style="bold", justify="right")
+    metrics_table.add_column("Assessment", justify="center")
 
-    metrics = [
-        ("Files", m.total_files, ""),
-        ("Classes", m.total_classes, ""),
-        ("Functions", m.total_functions, ""),
-        ("Modularity", f"{m.modularity:.2f}", "Good" if m.modularity > 0.6 else "Low"),
-        ("Avg Coupling", f"{m.avg_coupling:.1f}" if m.avg_coupling is not None else "N/A", ""),
-        ("Circular Dependencies", m.circular_dependencies, "⚠️" if m.circular_dependencies > 0 else "✓"),
-        ("God Classes", m.god_class_count, "⚠️" if m.god_class_count > 0 else "✓"),
-    ]
+    # Codebase size metrics
+    metrics_table.add_row("📁 Total Files", str(m.total_files), "")
+    metrics_table.add_row("🏛️  Classes", str(m.total_classes), "")
+    metrics_table.add_row("⚙️  Functions", str(m.total_functions), "")
+    if m.total_loc > 0:
+        metrics_table.add_row("📝 Lines of Code", f"{m.total_loc:,}", "")
 
-    for metric, value, status in metrics:
-        metrics_table.add_row(metric, str(value), status)
+    # Separator
+    metrics_table.add_row("", "", "")
+
+    # Quality metrics with color-coded assessments
+    modularity_status = "[green]Excellent[/green]" if m.modularity > 0.6 else "[yellow]Moderate[/yellow]" if m.modularity > 0.3 else "[red]Poor[/red]"
+    metrics_table.add_row("🔗 Modularity", f"{m.modularity:.2f}", modularity_status)
+
+    if m.avg_coupling is not None:
+        coupling_status = "[green]Good[/green]" if m.avg_coupling < 3 else "[yellow]Moderate[/yellow]" if m.avg_coupling < 5 else "[red]High[/red]"
+        metrics_table.add_row("🔄 Avg Coupling", f"{m.avg_coupling:.1f}", coupling_status)
+
+    circular_deps_status = "[green]✓ None[/green]" if m.circular_dependencies == 0 else f"[red]⚠️  {m.circular_dependencies}[/red]"
+    metrics_table.add_row("🔁 Circular Deps", str(m.circular_dependencies), circular_deps_status)
+
+    god_class_status = "[green]✓ None[/green]" if m.god_class_count == 0 else f"[red]⚠️  {m.god_class_count}[/red]"
+    metrics_table.add_row("👹 God Classes", str(m.god_class_count), god_class_status)
+
+    if m.dead_code_percentage > 0:
+        dead_code_status = "[green]✓ Low[/green]" if m.dead_code_percentage < 5 else "[yellow]⚠️  Moderate[/yellow]" if m.dead_code_percentage < 10 else "[red]❌ High[/red]"
+        metrics_table.add_row("💀 Dead Code", f"{m.dead_code_percentage:.1f}%", dead_code_status)
 
     console.print(metrics_table)
 
-    # Findings summary
+    # Findings summary with severity colors
     fs = health.findings_summary
     if fs.total > 0:
-        findings_table = Table(title="Findings Summary")
-        findings_table.add_column("Severity", style="bold")
-        findings_table.add_column("Count", style="cyan")
+        findings_table = Table(
+            title=f"🔍 Findings Summary ({fs.total} total)",
+            box=box.ROUNDED,
+            show_header=True,
+            header_style="bold red"
+        )
+        findings_table.add_column("Severity", style="bold", no_wrap=True)
+        findings_table.add_column("Count", style="bold", justify="right")
+        findings_table.add_column("Impact", justify="center")
 
-        if fs.critical > 0:
-            findings_table.add_row("[red]Critical[/red]", str(fs.critical))
-        if fs.high > 0:
-            findings_table.add_row("[bright_red]High[/bright_red]", str(fs.high))
-        if fs.medium > 0:
-            findings_table.add_row("[yellow]Medium[/yellow]", str(fs.medium))
-        if fs.low > 0:
-            findings_table.add_row("[blue]Low[/blue]", str(fs.low))
+        severity_data = [
+            (Severity.CRITICAL, fs.critical, "Must fix immediately"),
+            (Severity.HIGH, fs.high, "Should fix soon"),
+            (Severity.MEDIUM, fs.medium, "Plan to address"),
+            (Severity.LOW, fs.low, "Consider fixing"),
+            (Severity.INFO, fs.info, "Informational"),
+        ]
+
+        for severity, count, impact in severity_data:
+            if count > 0:
+                color = SEVERITY_COLORS[severity]
+                emoji = SEVERITY_EMOJI[severity]
+                severity_text = f"{emoji} [{color}]{severity.value.title()}[/{color}]"
+                count_text = f"[{color}]{count}[/{color}]"
+                findings_table.add_row(severity_text, count_text, f"[dim]{impact}[/dim]")
 
         console.print(findings_table)
+
+        # Detailed findings tree view
+        if health.findings:
+            console.print("\n[bold cyan]📋 Detailed Findings[/bold cyan]\n")
+            _display_findings_tree(health.findings[:10], SEVERITY_COLORS, SEVERITY_EMOJI)
+
+            if len(health.findings) > 10:
+                console.print(f"\n[dim]... and {len(health.findings) - 10} more findings[/dim]")
+                console.print("[dim]Use --output to save full report to JSON file[/dim]")
+
+
+def _display_findings_tree(findings, severity_colors, severity_emoji):
+    """Display findings in a tree structure grouped by detector."""
+    from collections import defaultdict
+
+    # Group findings by detector
+    by_detector = defaultdict(list)
+    for finding in findings:
+        by_detector[finding.detector].append(finding)
+
+    # Create tree for each detector
+    for detector, detector_findings in sorted(by_detector.items()):
+        tree = Tree(f"[bold cyan]{detector}[/bold cyan]")
+
+        for finding in detector_findings:
+            color = severity_colors[finding.severity]
+            emoji = severity_emoji[finding.severity]
+
+            # Create finding branch
+            severity_label = f"{emoji} [{color}]{finding.severity.value.upper()}[/{color}]"
+            finding_text = f"{severity_label}: {finding.title}"
+            finding_branch = tree.add(finding_text)
+
+            # Add description
+            if finding.description:
+                finding_branch.add(f"[dim]{finding.description}[/dim]")
+
+            # Add affected files
+            if finding.affected_files:
+                files_text = ", ".join(finding.affected_files[:3])
+                if len(finding.affected_files) > 3:
+                    files_text += f" [dim](+{len(finding.affected_files) - 3} more)[/dim]"
+                finding_branch.add(f"[yellow]Files:[/yellow] {files_text}")
+
+            # Add suggested fix if available
+            if finding.suggested_fix:
+                fix_branch = finding_branch.add("[green]💡 Suggested Fix:[/green]")
+                # Limit fix text length for display
+                fix_text = finding.suggested_fix
+                if len(fix_text) > 200:
+                    fix_text = fix_text[:200] + "..."
+                fix_branch.add(f"[dim]{fix_text}[/dim]")
+
+        console.print(tree)
+        console.print()  # Add spacing between detectors
 
 
 @cli.command()
