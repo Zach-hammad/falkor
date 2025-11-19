@@ -453,6 +453,163 @@ def _display_health_report(health) -> None:
 
 @cli.command()
 @click.option(
+    "--neo4j-uri", default=None, help="Neo4j connection URI (overrides config)"
+)
+@click.option("--neo4j-user", default=None, help="Neo4j username (overrides config)")
+@click.option(
+    "--neo4j-password",
+    default=None,
+    help="Neo4j password (overrides config, prompts if not provided)",
+)
+@click.pass_context
+def validate(
+    ctx: click.Context,
+    neo4j_uri: str | None,
+    neo4j_user: str | None,
+    neo4j_password: str | None,
+) -> None:
+    """Validate configuration and connectivity without running operations.
+
+    Checks:
+    - Configuration file validity (if present)
+    - Neo4j connection URI format
+    - Neo4j credentials
+    - Neo4j connectivity (database is reachable)
+    - All required settings are present
+
+    Exits with non-zero code if any validation fails.
+    """
+    config: FalkorConfig = ctx.obj['config']
+
+    console.print("\n[bold cyan]🐉 Falkor Configuration Validation[/bold cyan]\n")
+
+    validation_results = []
+    all_passed = True
+
+    # 1. Validate configuration file
+    console.print("[dim]Checking configuration file...[/dim]")
+    try:
+        # Config is already loaded in the parent command
+        validation_results.append(("Configuration file", "✓ Valid", "green"))
+        console.print("[green]✓[/green] Configuration file valid\n")
+    except Exception as e:
+        validation_results.append(("Configuration file", f"✗ {e}", "red"))
+        console.print(f"[red]✗[/red] Configuration file error: {e}\n")
+        all_passed = False
+
+    # 2. Validate Neo4j URI
+    console.print("[dim]Validating Neo4j URI...[/dim]")
+    final_neo4j_uri = neo4j_uri or config.neo4j.uri
+    try:
+        validated_uri = validate_neo4j_uri(final_neo4j_uri)
+        validation_results.append(("Neo4j URI", f"✓ {validated_uri}", "green"))
+        console.print(f"[green]✓[/green] Neo4j URI valid: {validated_uri}\n")
+    except ValidationError as e:
+        validation_results.append(("Neo4j URI", f"✗ {e.message}", "red"))
+        console.print(f"[red]✗[/red] {e.message}")
+        if e.suggestion:
+            console.print(f"[yellow]💡 {e.suggestion}[/yellow]\n")
+        all_passed = False
+        # Can't proceed without valid URI
+        _print_validation_summary(validation_results, all_passed)
+        raise click.Abort()
+
+    # 3. Validate Neo4j credentials
+    console.print("[dim]Validating Neo4j credentials...[/dim]")
+    final_neo4j_user = neo4j_user or config.neo4j.user
+    final_neo4j_password = neo4j_password or config.neo4j.password
+
+    # Prompt for password if not provided
+    if not final_neo4j_password:
+        final_neo4j_password = click.prompt("Neo4j password", hide_input=True)
+
+    try:
+        validated_user, validated_password = validate_neo4j_credentials(
+            final_neo4j_user, final_neo4j_password
+        )
+        validation_results.append(("Neo4j credentials", f"✓ User: {validated_user}", "green"))
+        console.print(f"[green]✓[/green] Neo4j credentials valid (user: {validated_user})\n")
+    except ValidationError as e:
+        validation_results.append(("Neo4j credentials", f"✗ {e.message}", "red"))
+        console.print(f"[red]✗[/red] {e.message}")
+        if e.suggestion:
+            console.print(f"[yellow]💡 {e.suggestion}[/yellow]\n")
+        all_passed = False
+        _print_validation_summary(validation_results, all_passed)
+        raise click.Abort()
+
+    # 4. Test Neo4j connectivity
+    console.print("[dim]Testing Neo4j connectivity...[/dim]")
+    try:
+        validate_neo4j_connection(validated_uri, validated_user, validated_password)
+        validation_results.append(("Neo4j connectivity", "✓ Connected successfully", "green"))
+        console.print("[green]✓[/green] Neo4j connection successful\n")
+    except ValidationError as e:
+        validation_results.append(("Neo4j connectivity", f"✗ {e.message}", "red"))
+        console.print(f"[red]✗[/red] {e.message}")
+        if e.suggestion:
+            console.print(f"[yellow]💡 {e.suggestion}[/yellow]\n")
+        all_passed = False
+
+    # 5. Validate ingestion settings
+    console.print("[dim]Validating ingestion settings...[/dim]")
+    try:
+        validate_file_size_limit(config.ingestion.max_file_size_mb)
+        validate_batch_size(config.ingestion.batch_size)
+        validation_results.append(("Ingestion settings", "✓ Valid", "green"))
+        console.print("[green]✓[/green] Ingestion settings valid\n")
+    except ValidationError as e:
+        validation_results.append(("Ingestion settings", f"✗ {e.message}", "red"))
+        console.print(f"[red]✗[/red] {e.message}")
+        if e.suggestion:
+            console.print(f"[yellow]💡 {e.suggestion}[/yellow]\n")
+        all_passed = False
+
+    # 6. Validate retry configuration
+    console.print("[dim]Validating retry configuration...[/dim]")
+    try:
+        validate_retry_config(
+            config.neo4j.max_retries,
+            config.neo4j.retry_backoff_factor,
+            config.neo4j.retry_base_delay
+        )
+        validation_results.append(("Retry configuration", "✓ Valid", "green"))
+        console.print("[green]✓[/green] Retry configuration valid\n")
+    except ValidationError as e:
+        validation_results.append(("Retry configuration", f"✗ {e.message}", "red"))
+        console.print(f"[red]✗[/red] {e.message}")
+        if e.suggestion:
+            console.print(f"[yellow]💡 {e.suggestion}[/yellow]\n")
+        all_passed = False
+
+    # Print summary
+    _print_validation_summary(validation_results, all_passed)
+
+    if not all_passed:
+        raise click.Abort()
+
+
+def _print_validation_summary(results: list, all_passed: bool) -> None:
+    """Print validation summary table."""
+    table = Table(title="Validation Summary")
+    table.add_column("Check", style="cyan")
+    table.add_column("Result", style="white")
+
+    for check, result, color in results:
+        table.add_row(check, f"[{color}]{result}[/{color}]")
+
+    console.print(table)
+
+    if all_passed:
+        console.print("\n[bold green]✓ All validations passed![/bold green]")
+        console.print("[dim]Your Falkor configuration is ready to use.[/dim]\n")
+    else:
+        console.print("\n[bold red]✗ Some validations failed[/bold red]")
+        console.print("[dim]Fix the issues above and try again.[/dim]\n")
+
+
+@cli.command()
+@click.option(
     "--format",
     "-f",
     type=click.Choice(["yaml", "json", "table"], case_sensitive=False),
