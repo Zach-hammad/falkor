@@ -166,7 +166,14 @@ def ingest(
         with LogContext(operation="ingest", repo_path=repo_path):
             logger.info("Starting ingestion")
 
-            with Neo4jClient(final_neo4j_uri, final_neo4j_user, final_neo4j_password) as db:
+            with Neo4jClient(
+                final_neo4j_uri,
+                final_neo4j_user,
+                final_neo4j_password,
+                max_retries=config.neo4j.max_retries,
+                retry_backoff_factor=config.neo4j.retry_backoff_factor,
+                retry_base_delay=config.neo4j.retry_base_delay,
+            ) as db:
                 pipeline = IngestionPipeline(
                     repo_path,
                     db,
@@ -248,7 +255,14 @@ def analyze(
         with LogContext(operation="analyze", repo_path=repo_path):
             logger.info("Starting analysis")
 
-            with Neo4jClient(final_neo4j_uri, final_neo4j_user, final_neo4j_password) as db:
+            with Neo4jClient(
+                final_neo4j_uri,
+                final_neo4j_user,
+                final_neo4j_password,
+                max_retries=config.neo4j.max_retries,
+                retry_backoff_factor=config.neo4j.retry_backoff_factor,
+                retry_base_delay=config.neo4j.retry_base_delay,
+            ) as db:
                 # Convert detector config to dict for detectors
                 detector_config_dict = asdict(config.detectors)
                 engine = AnalysisEngine(db, detector_config=detector_config_dict)

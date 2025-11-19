@@ -1,8 +1,10 @@
 """Unit tests for Neo4jClient."""
 
 from unittest.mock import Mock, MagicMock, patch
+import time
 
 import pytest
+from neo4j.exceptions import ServiceUnavailable, SessionExpired
 
 from falkor.graph.client import Neo4jClient
 from falkor.models import FileEntity, ClassEntity, FunctionEntity, Relationship, RelationshipType, NodeType
@@ -332,3 +334,177 @@ class TestErrorHandling:
             client.execute_query("INVALID CYPHER")
 
         assert "Query failed" in str(exc_info.value)
+
+class TestRetryLogic:
+    """Test retry logic for transient connection failures."""
+
+    def test_connection_retry_succeeds_on_second_attempt(self):
+        """Test connection succeeds after initial failure."""
+        with patch('falkor.graph.client.GraphDatabase') as mock_gd:
+            mock_driver = MagicMock()
+            mock_gd.driver.return_value = mock_driver
+            
+            # First call fails, second succeeds
+            mock_driver.verify_connectivity.side_effect = [
+                ServiceUnavailable("Connection refused"),
+                None  # Success on second attempt
+            ]
+
+            start_time = time.time()
+            client = Neo4jClient(
+                uri="bolt://localhost:7687",
+                username="neo4j",
+                password="test",
+                max_retries=3,
+                retry_base_delay=0.1  # Fast retry for tests
+            )
+            duration = time.time() - start_time
+
+            # Should succeed after retry
+            assert client.driver is not None
+            # Should have taken at least the base delay
+            assert duration >= 0.1
+
+            client.close()
+
+    def test_connection_retry_fails_after_max_retries(self):
+        """Test connection fails after exhausting retries."""
+        with patch('falkor.graph.client.GraphDatabase') as mock_gd:
+            mock_driver = MagicMock()
+            mock_gd.driver.return_value = mock_driver
+            
+            # Always fail
+            mock_driver.verify_connectivity.side_effect = ServiceUnavailable("Connection refused")
+
+            with pytest.raises(ServiceUnavailable) as exc_info:
+                Neo4jClient(
+                    uri="bolt://localhost:7687",
+                    username="neo4j",
+                    password="test",
+                    max_retries=2,
+                    retry_base_delay=0.1  # Fast retry for tests
+                )
+
+            error_message = str(exc_info.value)
+            assert "Could not connect" in error_message
+            assert "after 2 attempts" in error_message
+
+    def test_connection_retry_exponential_backoff(self):
+        """Test exponential backoff delay calculation."""
+        with patch('falkor.graph.client.GraphDatabase') as mock_gd, \
+             patch('time.sleep') as mock_sleep:
+            mock_driver = MagicMock()
+            mock_gd.driver.return_value = mock_driver
+            
+            # Fail twice, then succeed
+            mock_driver.verify_connectivity.side_effect = [
+                ServiceUnavailable("Connection refused"),
+                ServiceUnavailable("Connection refused"),
+                None  # Success on third attempt
+            ]
+
+            client = Neo4jClient(
+                uri="bolt://localhost:7687",
+                username="neo4j",
+                password="test",
+                max_retries=3,
+                retry_base_delay=1.0,
+                retry_backoff_factor=2.0
+            )
+
+            # Verify exponential backoff delays: 1.0, 2.0
+            assert mock_sleep.call_count == 2
+            delays = [call.args[0] for call in mock_sleep.call_args_list]
+            assert delays[0] == 1.0  # First retry: base_delay * (2^0)
+            assert delays[1] == 2.0  # Second retry: base_delay * (2^1)
+
+            client.close()
+
+    def test_query_retry_on_session_expired(self):
+        """Test query retries on SessionExpired error."""
+        with patch('falkor.graph.client.GraphDatabase') as mock_gd:
+            mock_driver = MagicMock()
+            mock_session = MagicMock()
+            mock_result = MagicMock()
+            mock_result.__iter__.return_value = [{"count": 5}]
+            
+            mock_gd.driver.return_value = mock_driver
+            mock_driver.verify_connectivity.return_value = None
+            mock_driver.session.return_value.__enter__.return_value = mock_session
+            mock_driver.session.return_value.__exit__.return_value = None
+
+            # First query fails with SessionExpired, second succeeds
+            mock_session.run.side_effect = [
+                SessionExpired("Session expired"),
+                mock_result
+            ]
+
+            client = Neo4jClient(
+                uri="bolt://localhost:7687",
+                username="neo4j",
+                password="test",
+                max_retries=2,
+                retry_base_delay=0.1
+            )
+
+            # Should succeed after retry
+            result = client.execute_query("MATCH (n) RETURN count(n) as count")
+            assert len(result) == 1
+            assert result[0]["count"] == 5
+
+            client.close()
+
+    def test_query_retry_fails_on_non_transient_error(self):
+        """Test query fails immediately on non-transient errors."""
+        with patch('falkor.graph.client.GraphDatabase') as mock_gd, \
+             patch('time.sleep') as mock_sleep:
+            mock_driver = MagicMock()
+            mock_session = MagicMock()
+            
+            mock_gd.driver.return_value = mock_driver
+            mock_driver.verify_connectivity.return_value = None
+            mock_driver.session.return_value.__enter__.return_value = mock_session
+            mock_driver.session.return_value.__exit__.return_value = None
+
+            # Non-transient error (syntax error)
+            mock_session.run.side_effect = ValueError("Invalid query syntax")
+
+            client = Neo4jClient(
+                uri="bolt://localhost:7687",
+                username="neo4j",
+                password="test",
+                max_retries=3,
+                retry_base_delay=0.1
+            )
+
+            # Should fail immediately without retries
+            with pytest.raises(ValueError):
+                client.execute_query("INVALID QUERY")
+
+            # No retries should have occurred
+            assert mock_sleep.call_count == 0
+
+            client.close()
+
+    def test_configurable_retry_parameters(self):
+        """Test that retry parameters can be configured."""
+        with patch('falkor.graph.client.GraphDatabase') as mock_gd:
+            mock_driver = MagicMock()
+            mock_gd.driver.return_value = mock_driver
+            mock_driver.verify_connectivity.return_value = None
+
+            client = Neo4jClient(
+                uri="bolt://localhost:7687",
+                username="neo4j",
+                password="test",
+                max_retries=5,
+                retry_backoff_factor=3.0,
+                retry_base_delay=2.0
+            )
+
+            # Verify configuration was set
+            assert client.max_retries == 5
+            assert client.retry_backoff_factor == 3.0
+            assert client.retry_base_delay == 2.0
+
+            client.close()

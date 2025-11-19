@@ -1,12 +1,16 @@
 """Neo4j database client."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable, TypeVar
 from neo4j import GraphDatabase, Driver, Result
+from neo4j.exceptions import ServiceUnavailable, SessionExpired
 import logging
+import time
 
 from falkor.models import Entity, Relationship, NodeType, RelationshipType
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar('T')
 
 
 class Neo4jClient:
@@ -17,6 +21,9 @@ class Neo4jClient:
         uri: str = "bolt://localhost:7687",
         username: str = "neo4j",
         password: str = "password",
+        max_retries: int = 3,
+        retry_backoff_factor: float = 2.0,
+        retry_base_delay: float = 1.0,
     ):
         """Initialize Neo4j client.
 
@@ -24,8 +31,19 @@ class Neo4jClient:
             uri: Neo4j connection URI
             username: Database username
             password: Database password
+            max_retries: Maximum number of connection retry attempts (default: 3)
+            retry_backoff_factor: Exponential backoff multiplier (default: 2.0)
+            retry_base_delay: Base delay in seconds between retries (default: 1.0)
         """
-        self.driver: Driver = GraphDatabase.driver(uri, auth=(username, password))
+        self.uri = uri
+        self.username = username
+        self.password = password
+        self.max_retries = max_retries
+        self.retry_backoff_factor = retry_backoff_factor
+        self.retry_base_delay = retry_base_delay
+
+        # Connect with retry logic
+        self.driver: Driver = self._connect_with_retry()
         logger.info(f"Connected to Neo4j at {uri}")
 
     def close(self) -> None:
@@ -39,8 +57,96 @@ class Neo4jClient:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.close()
 
+    def _connect_with_retry(self) -> Driver:
+        """Establish connection with retry logic and exponential backoff.
+
+        Returns:
+            Neo4j Driver instance
+
+        Raises:
+            ServiceUnavailable: If connection fails after max retries
+        """
+        attempt = 0
+        last_exception = None
+
+        while attempt <= self.max_retries:
+            try:
+                driver = GraphDatabase.driver(self.uri, auth=(self.username, self.password))
+                # Verify connectivity with a simple query
+                driver.verify_connectivity()
+                if attempt > 0:
+                    logger.info(f"Successfully connected to Neo4j at {self.uri} after {attempt} retries")
+                return driver
+            except (ServiceUnavailable, Exception) as e:
+                last_exception = e
+                attempt += 1
+
+                if attempt > self.max_retries:
+                    logger.error(
+                        f"Failed to connect to Neo4j at {self.uri} after {self.max_retries} retries: {e}"
+                    )
+                    raise ServiceUnavailable(
+                        f"Could not connect to Neo4j at {self.uri} after {self.max_retries} attempts. "
+                        f"Please check that Neo4j is running and accessible. Last error: {e}"
+                    ) from e
+
+                # Calculate exponential backoff delay
+                delay = self.retry_base_delay * (self.retry_backoff_factor ** (attempt - 1))
+                logger.warning(
+                    f"Connection attempt {attempt}/{self.max_retries} failed: {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                time.sleep(delay)
+
+        # Should never reach here, but for type safety
+        raise ServiceUnavailable("Connection failed") from last_exception
+
+    def _retry_operation(self, operation: Callable[[], T], operation_name: str = "operation") -> T:
+        """Execute an operation with retry logic for transient errors.
+
+        Args:
+            operation: Function to execute
+            operation_name: Human-readable name for logging
+
+        Returns:
+            Result of the operation
+
+        Raises:
+            Exception: If operation fails after max retries
+        """
+        attempt = 0
+        last_exception = None
+
+        while attempt <= self.max_retries:
+            try:
+                return operation()
+            except (ServiceUnavailable, SessionExpired) as e:
+                last_exception = e
+                attempt += 1
+
+                if attempt > self.max_retries:
+                    logger.error(
+                        f"{operation_name} failed after {self.max_retries} retries: {e}"
+                    )
+                    raise
+
+                # Calculate exponential backoff delay
+                delay = self.retry_base_delay * (self.retry_backoff_factor ** (attempt - 1))
+                logger.warning(
+                    f"{operation_name} attempt {attempt}/{self.max_retries} failed: {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                time.sleep(delay)
+            except Exception as e:
+                # Non-transient errors should fail immediately
+                logger.error(f"{operation_name} failed with non-transient error: {e}")
+                raise
+
+        # Should never reach here, but for type safety
+        raise last_exception or Exception(f"{operation_name} failed")
+
     def execute_query(self, query: str, parameters: Optional[Dict] = None) -> List[Dict]:
-        """Execute a Cypher query and return results.
+        """Execute a Cypher query and return results with retry logic.
 
         Args:
             query: Cypher query string
@@ -49,9 +155,12 @@ class Neo4jClient:
         Returns:
             List of result records as dictionaries
         """
-        with self.driver.session() as session:
-            result: Result = session.run(query, parameters or {})
-            return [dict(record) for record in result]
+        def _execute():
+            with self.driver.session() as session:
+                result: Result = session.run(query, parameters or {})
+                return [dict(record) for record in result]
+
+        return self._retry_operation(_execute, operation_name="execute_query")
 
     def create_node(self, entity: Entity) -> str:
         """Create a node in the graph.

@@ -113,6 +113,9 @@ class Neo4jConfig:
     uri: str = "bolt://localhost:7687"
     user: str = "neo4j"
     password: Optional[str] = None
+    max_retries: int = 3
+    retry_backoff_factor: float = 2.0  # Exponential backoff multiplier
+    retry_base_delay: float = 1.0  # Base delay in seconds
 
 
 @dataclass
@@ -420,6 +423,21 @@ def load_config_from_env() -> Dict[str, Any]:
         neo4j["user"] = user
     if password := os.getenv("FALKOR_NEO4J_PASSWORD"):
         neo4j["password"] = password
+    if max_retries := os.getenv("FALKOR_NEO4J_MAX_RETRIES"):
+        try:
+            neo4j["max_retries"] = int(max_retries)
+        except ValueError:
+            logger.warning(f"Invalid FALKOR_NEO4J_MAX_RETRIES value: {max_retries}, ignoring")
+    if retry_backoff_factor := os.getenv("FALKOR_NEO4J_RETRY_BACKOFF_FACTOR"):
+        try:
+            neo4j["retry_backoff_factor"] = float(retry_backoff_factor)
+        except ValueError:
+            logger.warning(f"Invalid FALKOR_NEO4J_RETRY_BACKOFF_FACTOR value: {retry_backoff_factor}, ignoring")
+    if retry_base_delay := os.getenv("FALKOR_NEO4J_RETRY_BASE_DELAY"):
+        try:
+            neo4j["retry_base_delay"] = float(retry_base_delay)
+        except ValueError:
+            logger.warning(f"Invalid FALKOR_NEO4J_RETRY_BASE_DELAY value: {retry_base_delay}, ignoring")
     if neo4j:
         config["neo4j"] = neo4j
 
@@ -606,6 +624,9 @@ def generate_config_template(format: str = "yaml") -> str:
             f'uri = "{data["neo4j"]["uri"]}"',
             f'user = "{data["neo4j"]["user"]}"',
             f'password = "{data["neo4j"]["password"] or ""}"',
+            f'max_retries = {data["neo4j"]["max_retries"]}',
+            f'retry_backoff_factor = {data["neo4j"]["retry_backoff_factor"]}',
+            f'retry_base_delay = {data["neo4j"]["retry_base_delay"]}',
             "",
             "[ingestion]",
             f'patterns = {json.dumps(data["ingestion"]["patterns"])}',
