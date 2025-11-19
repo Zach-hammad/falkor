@@ -127,8 +127,8 @@ class DeadCodeDetector(CodeSmellDetector):
             if name in self.MAGIC_METHODS:
                 continue
 
-            # Check if it's an entry point
-            if any(name.startswith(ep) for ep in ["test_"]):
+            # Check if it's an entry point (exact match or prefix)
+            if name in self.ENTRY_POINTS or any(name.startswith(ep) for ep in ["test_"]):
                 continue
 
             # Additional check: filter out common decorator patterns in the name
@@ -181,12 +181,12 @@ class DeadCodeDetector(CodeSmellDetector):
         findings: List[Finding] = []
 
         query = """
-        MATCH (c:Class)
+        MATCH (file:File)-[:CONTAINS]->(c:Class)
         WHERE NOT (c)<-[:CALLS]-()  // Not instantiated
           AND NOT (c)<-[:INHERITS]-()  // Not inherited from
           AND NOT (c)<-[:USES]-()  // Not used in type hints
-        OPTIONAL MATCH (file:File)-[:CONTAINS]->(c)
-        OPTIONAL MATCH (c)-[:CONTAINS]->(m:Function)
+        OPTIONAL MATCH (file)-[:CONTAINS]->(m:Function)
+        WHERE m.qualifiedName STARTS WITH c.qualifiedName + '.'
         OPTIONAL MATCH (c)-[:HAS_DECORATOR]->(decorator)
         WITH c, file, count(m) AS method_count, collect(decorator.name) AS decorators
         // Filter out classes with decorators or in __all__

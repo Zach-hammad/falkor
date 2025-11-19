@@ -103,37 +103,15 @@ class IngestionPipeline:
         if not entities:
             return
 
-        # Batch create nodes and get mapping of qualified_name -> elementId
+        # Batch create nodes
         try:
             id_mapping = self.db.batch_create_nodes(entities)
             logger.info(f"Created {len(id_mapping)} nodes")
 
-            # Convert relationships to use elementId (create new objects to avoid mutation)
-            resolved_rels = []
-            logger.debug(f"Processing {len(relationships)} relationships")
-            logger.debug(f"ID mapping has {len(id_mapping)} entries")
-
-            for rel in relationships:
-                # Map qualified_name to elementId
-                source_id = id_mapping.get(rel.source_id, rel.source_id)
-                target_id = id_mapping.get(rel.target_id, rel.target_id)
-
-                logger.debug(f"Relationship: {rel.rel_type} from {rel.source_id[:50]}... to {rel.target_id[:50]}...")
-                logger.debug(f"  Source mapped: {source_id[:50] if isinstance(source_id, str) else source_id}...")
-                logger.debug(f"  Target mapped: {target_id[:50] if isinstance(target_id, str) else target_id}...")
-
-                # Create new relationship with resolved IDs
-                resolved_rel = Relationship(
-                    source_id=source_id,
-                    target_id=target_id,
-                    rel_type=rel.rel_type,
-                    properties=rel.properties,
-                )
-                resolved_rels.append(resolved_rel)
-
-            # Batch create all relationships at once
-            if resolved_rels:
-                self.db.batch_create_relationships(resolved_rels)
+            # Batch create all relationships
+            # Note: batch_create_relationships now accepts qualified names directly
+            if relationships:
+                self.db.batch_create_relationships(relationships)
                 logger.info(f"Created {len(relationships)} relationships")
             else:
                 logger.warning("No relationships to create")

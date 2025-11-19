@@ -21,13 +21,13 @@ logger = logging.getLogger(__name__)
 class AnalysisEngine:
     """Orchestrates code smell detection and health scoring."""
 
-    # Grade thresholds
+    # Grade thresholds (inclusive lower bound, exclusive upper bound except for A)
     GRADES = {
         "A": (90, 100),
-        "B": (80, 89),
-        "C": (70, 79),
-        "D": (60, 69),
-        "F": (0, 59),
+        "B": (80, 90),
+        "C": (70, 80),
+        "D": (60, 70),
+        "F": (0, 60),
     }
 
     # Category weights
@@ -138,7 +138,10 @@ class AnalysisEngine:
         RETURN avg(calls) as avg_coupling
         """
         coupling_result = self.db.execute_query(coupling_query)
-        avg_coupling = coupling_result[0].get("avg_coupling", 0.0) if coupling_result else 0.0
+        if coupling_result and coupling_result[0].get("avg_coupling") is not None:
+            avg_coupling = float(coupling_result[0]["avg_coupling"])
+        else:
+            avg_coupling = 0.0
 
         # Calculate modularity using community detection
         modularity = self._calculate_modularity()
@@ -200,10 +203,20 @@ class AnalysisEngine:
         return (layer_score + boundary_score + abstraction_score) / 3
 
     def _score_to_grade(self, score: float) -> str:
-        """Convert numeric score to letter grade."""
+        """Convert numeric score to letter grade.
+
+        Uses inclusive lower bound and exclusive upper bound, except for grade A
+        which includes the maximum score of 100.
+        """
         for grade, (min_score, max_score) in self.GRADES.items():
-            if min_score <= score <= max_score:
-                return grade
+            if grade == "A":
+                # A grade: 90 <= score <= 100 (inclusive on both ends)
+                if min_score <= score <= max_score:
+                    return grade
+            else:
+                # Other grades: min <= score < max
+                if min_score <= score < max_score:
+                    return grade
         return "F"
 
     def _summarize_findings(self, findings: List[Finding]) -> FindingsSummary:

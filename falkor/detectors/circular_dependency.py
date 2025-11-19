@@ -27,7 +27,7 @@ class CircularDependencyDetector(CodeSmellDetector):
         query = """
         MATCH (f1:File)
         MATCH (f2:File)
-        WHERE id(f1) < id(f2) AND f1 <> f2
+        WHERE elementId(f1) < elementId(f2) AND f1 <> f2
         MATCH path = shortestPath((f1)-[:IMPORTS*1..15]->(f2))
         MATCH cyclePath = shortestPath((f2)-[:IMPORTS*1..15]->(f1))
         WITH DISTINCT [node IN nodes(path) + nodes(cyclePath) WHERE node:File | node.filePath] AS cycle

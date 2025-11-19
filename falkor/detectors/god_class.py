@@ -36,17 +36,20 @@ class GodClassDetector(CodeSmellDetector):
         findings: List[Finding] = []
 
         query = """
-        MATCH (c:Class)
-        OPTIONAL MATCH (c)-[:CONTAINS]->(m:Function)
-        OPTIONAL MATCH (m)-[:CALLS]->(called)
-        OPTIONAL MATCH (c)-[:IMPORTS]->(imported:Class)
-        WITH c,
-             count(DISTINCT m) AS method_count,
-             sum(COALESCE(m.complexity, 0)) AS total_complexity,
-             count(DISTINCT called) + count(DISTINCT imported) AS coupling_count,
+        MATCH (file:File)-[:CONTAINS]->(c:Class)
+        WITH c, file
+        MATCH (file)-[:CONTAINS]->(m:Function)
+        WHERE m.qualifiedName STARTS WITH c.qualifiedName + '.'
+        WITH c, file,
+             collect(m) AS methods,
+             sum(m.complexity) AS total_complexity,
              COALESCE(c.lineEnd, 0) - COALESCE(c.lineStart, 0) AS loc
+        WITH c, file, methods, size(methods) AS method_count, total_complexity, loc
         WHERE method_count >= 10 OR total_complexity >= 30 OR loc >= 200
-        OPTIONAL MATCH (file:File)-[:CONTAINS]->(c)
+        UNWIND methods AS m
+        OPTIONAL MATCH (m)-[:CALLS]->(called)
+        WITH c, file, methods, method_count, total_complexity, loc,
+             count(DISTINCT called) AS coupling_count
         RETURN c.qualifiedName AS qualified_name,
                c.name AS name,
                c.filePath AS file_path,
@@ -382,7 +385,10 @@ class GodClassDetector(CodeSmellDetector):
         """
         # Query to get method-field usage patterns
         query = """
-        MATCH (c:Class {qualifiedName: $qualified_name})-[:CONTAINS]->(m:Function)
+        MATCH (c:Class {qualifiedName: $qualified_name})
+        MATCH (file:File)-[:CONTAINS]->(c)
+        MATCH (file)-[:CONTAINS]->(m:Function)
+        WHERE m.qualifiedName STARTS WITH c.qualifiedName + '.'
         OPTIONAL MATCH (m)-[:USES]->(field)
         WHERE field:Variable OR field:Attribute
         WITH m, collect(DISTINCT field.name) AS fields

@@ -212,6 +212,10 @@ class Neo4jClient:
     def batch_create_relationships(self, relationships: List[Relationship]) -> int:
         """Create multiple relationships in a single transaction.
 
+        Accepts relationships with source_id and target_id as qualified names.
+        Will match existing nodes by qualifiedName, and create external nodes
+        for targets that don't exist (e.g., external imports).
+
         Args:
             relationships: List of relationships to create
 
@@ -239,19 +243,19 @@ class Neo4jClient:
                 {
                     "source_id": r.source_id,
                     "target_id": r.target_id,
-                    "target_qualified_name": r.target_id,
-                    "target_name": r.target_id.split(".")[-1] if "." in r.target_id else r.target_id,
+                    "target_name": r.target_id.split(".")[-1] if "." in r.target_id else r.target_id.split("::")[-1],
                     "properties": r.properties,
                 }
                 for r in rels_of_type
             ]
 
             # SECURITY: rel_type validated above via assertion
+            # Match source by qualifiedName (can be File path, Class/Function qualified name)
+            # MERGE target by qualifiedName (create if external import/reference)
             query = f"""
             UNWIND $rels AS rel
-            MATCH (source)
-            WHERE elementId(source) = rel.source_id
-            MERGE (target {{qualifiedName: rel.target_qualified_name}})
+            MATCH (source {{qualifiedName: rel.source_id}})
+            MERGE (target {{qualifiedName: rel.target_id}})
             ON CREATE SET target.name = rel.target_name, target.external = true
             CREATE (source)-[r:{rel_type}]->(target)
             SET r = rel.properties

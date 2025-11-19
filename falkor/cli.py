@@ -110,7 +110,7 @@ def analyze(
 def _display_health_report(health) -> None:
     """Display health report in terminal."""
     # Overall grade
-    grade_colors = {"A": "green", "B": "cyan", "C": "yellow", "D": "orange", "F": "red"}
+    grade_colors = {"A": "green", "B": "cyan", "C": "yellow", "D": "bright_red", "F": "red"}
     grade_color = grade_colors.get(health.grade, "white")
 
     console.print(
@@ -173,7 +173,7 @@ def _display_health_report(health) -> None:
         if fs.critical > 0:
             findings_table.add_row("[red]Critical[/red]", str(fs.critical))
         if fs.high > 0:
-            findings_table.add_row("[orange]High[/orange]", str(fs.high))
+            findings_table.add_row("[bright_red]High[/bright_red]", str(fs.high))
         if fs.medium > 0:
             findings_table.add_row("[yellow]Medium[/yellow]", str(fs.medium))
         if fs.low > 0:
