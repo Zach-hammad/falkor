@@ -155,8 +155,10 @@ class Neo4jClient:
             RETURN elementId(n) as id, entity.qualifiedName as qualifiedName
             """
 
-            entity_dicts = [
-                {
+            # Convert entities to dicts, including all type-specific fields
+            entity_dicts = []
+            for e in entities_of_type:
+                entity_dict = {
                     "name": e.name,
                     "qualifiedName": e.qualified_name,
                     "filePath": e.file_path,
@@ -164,8 +166,30 @@ class Neo4jClient:
                     "lineEnd": e.line_end,
                     "docstring": e.docstring,
                 }
-                for e in entities_of_type
-            ]
+
+                # Add type-specific fields
+                if hasattr(e, "is_external"):  # Module
+                    entity_dict["is_external"] = e.is_external
+                if hasattr(e, "package"):  # Module
+                    entity_dict["package"] = e.package
+                if hasattr(e, "loc"):  # File
+                    entity_dict["loc"] = e.loc
+                if hasattr(e, "hash"):  # File
+                    entity_dict["hash"] = e.hash
+                if hasattr(e, "language"):  # File
+                    entity_dict["language"] = e.language
+                if hasattr(e, "is_abstract"):  # Class
+                    entity_dict["is_abstract"] = e.is_abstract
+                if hasattr(e, "complexity"):  # Class/Function
+                    entity_dict["complexity"] = e.complexity
+                if hasattr(e, "parameters"):  # Function
+                    entity_dict["parameters"] = e.parameters
+                if hasattr(e, "return_type"):  # Function
+                    entity_dict["return_type"] = e.return_type
+                if hasattr(e, "is_async"):  # Function
+                    entity_dict["is_async"] = e.is_async
+
+                entity_dicts.append(entity_dict)
 
             results = self.execute_query(query, {"entities": entity_dicts})
             for r in results:

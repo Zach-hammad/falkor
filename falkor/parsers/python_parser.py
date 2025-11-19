@@ -9,6 +9,7 @@ from falkor.parsers.base import CodeParser
 from falkor.models import (
     Entity,
     FileEntity,
+    ModuleEntity,
     ClassEntity,
     FunctionEntity,
     Relationship,
@@ -74,6 +75,10 @@ class PythonParser(CodeParser):
                 if self._is_top_level(node, tree):
                     func_entity = self._extract_function(node, file_path)
                     entities.append(func_entity)
+
+        # Extract module entities from imports
+        module_entities = self._extract_modules(tree, file_path)
+        entities.extend(module_entities)
 
         return entities
 
@@ -150,6 +155,9 @@ class PythonParser(CodeParser):
 
         # Extract class inheritance relationships
         self._extract_inheritance(tree, file_path, relationships)
+
+        # Extract method override relationships
+        self._extract_overrides(tree, file_path, entity_map, relationships)
 
         # Create CONTAINS relationships
         file_qualified_name = file_path
@@ -520,3 +528,134 @@ class PythonParser(CodeParser):
             # Extract the base type without the subscript
             return self._get_base_class_name(node.value)
         return None
+
+    def _extract_modules(self, tree: ast.AST, file_path: str) -> List[ModuleEntity]:
+        """Extract Module entities from import statements.
+
+        Args:
+            tree: Python AST
+            file_path: Path to source file
+
+        Returns:
+            List of ModuleEntity objects
+        """
+        modules: Dict[str, ModuleEntity] = {}  # Deduplicate by qualified name
+
+        # Only scan module-level imports
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                # import foo, bar
+                for alias in node.names:
+                    module_name = alias.name
+                    if module_name not in modules:
+                        modules[module_name] = ModuleEntity(
+                            name=module_name.split(".")[-1],  # Last component
+                            qualified_name=module_name,
+                            file_path=file_path,  # Source file that imports it
+                            line_start=node.lineno,
+                            line_end=node.lineno,
+                            is_external=True,  # Assume external for now
+                            package=self._get_package_name(module_name),
+                        )
+
+            elif isinstance(node, ast.ImportFrom):
+                # from foo import bar
+                module_name = node.module or ""  # Can be None for relative imports
+
+                # Create module entity for the "from" module if it exists
+                if module_name and module_name not in modules:
+                    modules[module_name] = ModuleEntity(
+                        name=module_name.split(".")[-1],
+                        qualified_name=module_name,
+                        file_path=file_path,
+                        line_start=node.lineno,
+                        line_end=node.lineno,
+                        is_external=True,
+                        package=self._get_package_name(module_name),
+                    )
+
+                # Also create entities for imported items if they look like modules
+                # (e.g., "from typing import List" - List is not a module)
+                # For now, we'll skip this and only create the parent module
+
+        return list(modules.values())
+
+    def _get_package_name(self, module_name: str) -> Optional[str]:
+        """Extract parent package name from module name.
+
+        Args:
+            module_name: Fully qualified module name (e.g., "os.path")
+
+        Returns:
+            Parent package name (e.g., "os") or None
+        """
+        if "." in module_name:
+            return module_name.rsplit(".", 1)[0]
+        return None
+
+    def _extract_overrides(
+        self,
+        tree: ast.AST,
+        file_path: str,
+        entity_map: Dict[str, Entity],
+        relationships: List[Relationship],
+    ) -> None:
+        """Extract method override relationships from AST.
+
+        Detects when a method in a child class overrides a method in a parent class.
+        Only works for intra-file inheritance (both classes in same file).
+
+        Args:
+            tree: Python AST
+            file_path: Path to source file
+            entity_map: Map of qualified_name to Entity
+            relationships: List to append relationships to
+        """
+        # Build a map of class_name -> class_node -> methods
+        class_info: Dict[str, tuple[ast.ClassDef, Dict[str, str]]] = {}
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                # Extract method names for this class
+                methods: Dict[str, str] = {}  # method_name -> qualified_name
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        method_qualified = f"{file_path}::{node.name}.{item.name}"
+                        methods[item.name] = method_qualified
+
+                class_info[node.name] = (node, methods)
+
+        # Now check for overrides
+        for class_name, (class_node, child_methods) in class_info.items():
+            # Check each base class
+            for base in class_node.bases:
+                base_name = self._get_base_class_name(base)
+                if not base_name:
+                    continue
+
+                # Check if base class is defined in this file
+                if base_name in class_info:
+                    parent_node, parent_methods = class_info[base_name]
+
+                    # Check for method overrides
+                    for method_name, child_method_qualified in child_methods.items():
+                        if method_name in parent_methods:
+                            # Found an override!
+                            parent_method_qualified = parent_methods[method_name]
+
+                            # Skip special methods like __init__ (common but not interesting)
+                            if method_name.startswith("__") and method_name.endswith("__"):
+                                continue
+
+                            relationships.append(
+                                Relationship(
+                                    source_id=child_method_qualified,
+                                    target_id=parent_method_qualified,
+                                    rel_type=RelationshipType.OVERRIDES,
+                                    properties={
+                                        "method_name": method_name,
+                                        "child_class": class_name,
+                                        "parent_class": base_name,
+                                    },
+                                )
+                            )

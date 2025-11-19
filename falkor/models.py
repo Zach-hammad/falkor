@@ -68,6 +68,16 @@ class FileEntity(Entity):
 
 
 @dataclass
+class ModuleEntity(Entity):
+    """Module/Package node."""
+    is_external: bool = True  # True if from external package, False if in codebase
+    package: Optional[str] = None  # Parent package (e.g., "os" for "os.path")
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.MODULE
+
+
+@dataclass
 class ClassEntity(Entity):
     """Class node."""
     is_abstract: bool = False
