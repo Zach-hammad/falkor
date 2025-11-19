@@ -548,7 +548,7 @@ def generate_config_template(format: str = "yaml") -> str:
 # - In your home directory: ~/.falkorrc
 # - In your config directory: ~/.config/falkor.toml
 #
-# Environment variables can be referenced using ${VAR_NAME} syntax.
+# Environment variables can be referenced using ${{VAR_NAME}} syntax.
 
 {template}"""
 

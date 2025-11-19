@@ -41,6 +41,13 @@ dev = [
     "black>=23.0.0",
     "ruff>=0.1.0",
     "mypy>=1.7.0",
+    "pyyaml>=6.0",  # For YAML config support in tests
+    "tomli>=2.0.0",  # For TOML support on Python <3.11
+]
+
+config = [
+    "pyyaml>=6.0",  # YAML config file support (.falkorrc)
+    "tomli>=2.0.0; python_version < '3.11'",  # TOML support for older Python
 ]
 
 gds = [
