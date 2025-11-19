@@ -46,12 +46,12 @@ class RelationshipType(str, Enum):
 @dataclass
 class Entity:
     """Base entity extracted from code."""
-    node_type: NodeType
     name: str
     qualified_name: str
     file_path: str
     line_start: int
     line_end: int
+    node_type: Optional[NodeType] = None
     docstring: Optional[str] = None
     metadata: Dict = field(default_factory=dict)
 

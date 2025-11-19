@@ -94,18 +94,26 @@ class Neo4jClient:
         Args:
             rel: Relationship to create
         """
+        # Try to find source by elementId, target by elementId or qualifiedName
         query = f"""
-        MATCH (source), (target)
-        WHERE elementId(source) = $source_id AND elementId(target) = $target_id
-        CREATE (source)-[r:{rel.rel_type}]->(target)
+        MATCH (source)
+        WHERE elementId(source) = $source_id
+        MERGE (target {{qualifiedName: $target_qualified_name}})
+        ON CREATE SET target.name = $target_name, target.external = true
+        CREATE (source)-[r:{rel.rel_type.value}]->(target)
         SET r = $properties
         """
+
+        # Extract target name from qualified name (e.g., "os.path" -> "path")
+        target_name = rel.target_id.split(".")[-1] if "." in rel.target_id else rel.target_id
 
         self.execute_query(
             query,
             {
                 "source_id": rel.source_id,
                 "target_id": rel.target_id,
+                "target_qualified_name": rel.target_id,
+                "target_name": target_name,
                 "properties": rel.properties,
             },
         )

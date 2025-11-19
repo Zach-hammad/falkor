@@ -95,20 +95,58 @@ class PythonParser(CodeParser):
         # Build entity lookup map
         entity_map = {e.qualified_name: e for e in entities}
 
-        # Extract imports
-        for node in ast.walk(tree):
+        # Extract imports (only module-level, not nested in functions/classes)
+        file_entity_name = file_path  # Use file path as qualified name for File node
+
+        # Use tree.body to only get module-level statements
+        for node in tree.body:
             if isinstance(node, ast.Import):
+                # Handle: import module [as alias]
                 for alias in node.names:
-                    # TODO: Create import relationships
-                    pass
+                    module_name = alias.name
+                    # Create IMPORTS relationship from File to module
+                    relationships.append(
+                        Relationship(
+                            source_id=file_entity_name,
+                            target_id=module_name,  # Will be mapped to Module node
+                            rel_type=RelationshipType.IMPORTS,
+                            properties={
+                                "alias": alias.asname if alias.asname else None,
+                                "line": node.lineno,
+                            },
+                        )
+                    )
 
             elif isinstance(node, ast.ImportFrom):
-                # TODO: Handle 'from X import Y' statements
-                pass
+                # Handle: from module import name [as alias]
+                module_name = node.module or ""  # node.module can be None for "from . import"
+                level = node.level  # Relative import level (0 = absolute, 1+ = relative)
 
-            elif isinstance(node, ast.Call):
-                # TODO: Extract function calls
-                pass
+                for alias in node.names:
+                    imported_name = alias.name
+                    # For "from foo import bar", create qualified name "foo.bar"
+                    if module_name:
+                        qualified_import = f"{module_name}.{imported_name}"
+                    else:
+                        qualified_import = imported_name
+
+                    relationships.append(
+                        Relationship(
+                            source_id=file_entity_name,
+                            target_id=qualified_import,
+                            rel_type=RelationshipType.IMPORTS,
+                            properties={
+                                "alias": alias.asname if alias.asname else None,
+                                "from_module": module_name,
+                                "imported_name": imported_name,
+                                "relative_level": level,
+                                "line": node.lineno,
+                            },
+                        )
+                    )
+
+        # Extract function calls - need to track which function makes each call
+        self._extract_calls(tree, file_path, entity_map, relationships)
 
         # Create CONTAINS relationships
         file_qualified_name = file_path
@@ -282,3 +320,120 @@ class PythonParser(CodeParser):
             Docstring or None
         """
         return ast.get_docstring(node)
+
+    def _extract_calls(
+        self,
+        tree: ast.AST,
+        file_path: str,
+        entity_map: Dict[str, Entity],
+        relationships: List[Relationship],
+    ) -> None:
+        """Extract function call relationships from AST.
+
+        Args:
+            tree: Python AST
+            file_path: Path to source file
+            entity_map: Map of qualified_name to Entity
+            relationships: List to append relationships to
+        """
+
+        class CallVisitor(ast.NodeVisitor):
+            """AST visitor to track function calls within their scope."""
+
+            def __init__(self, file_path: str):
+                self.file_path = file_path
+                self.current_class: Optional[str] = None
+                self.function_stack: List[str] = []  # Stack for nested functions
+                self.calls: List[tuple[str, str, int]] = []  # (caller, callee, line)
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                """Visit class definition."""
+                old_class = self.current_class
+                self.current_class = node.name
+                self.generic_visit(node)
+                self.current_class = old_class
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                """Visit function definition."""
+                self.function_stack.append(node.name)
+                self.generic_visit(node)
+                self.function_stack.pop()
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                """Visit async function definition."""
+                self.function_stack.append(node.name)
+                self.generic_visit(node)
+                self.function_stack.pop()
+
+            def visit_Call(self, node: ast.Call) -> None:
+                """Visit function call."""
+                if self.function_stack:
+                    # Build function name from stack (handles nested functions)
+                    func_name = ".".join(self.function_stack)
+
+                    # Determine caller qualified name
+                    if self.current_class:
+                        caller = f"{self.file_path}::{self.current_class}.{func_name}"
+                    else:
+                        caller = f"{self.file_path}::{func_name}"
+
+                    # Determine callee name (best effort)
+                    callee = self._get_call_name(node)
+                    if callee:
+                        self.calls.append((caller, callee, node.lineno))
+
+                self.generic_visit(node)
+
+            def _get_call_name(self, node: ast.Call) -> Optional[str]:
+                """Extract the name of what's being called.
+
+                Args:
+                    node: Call AST node
+
+                Returns:
+                    Called name or None
+                """
+                func = node.func
+                if isinstance(func, ast.Name):
+                    # Simple call: foo()
+                    return func.id
+                elif isinstance(func, ast.Attribute):
+                    # Method call: obj.method()
+                    # Try to build qualified name
+                    parts = []
+                    current = func
+                    while isinstance(current, ast.Attribute):
+                        parts.append(current.attr)
+                        current = current.value
+                    if isinstance(current, ast.Name):
+                        parts.append(current.id)
+                    return ".".join(reversed(parts))
+                return None
+
+        # Visit tree and collect calls
+        visitor = CallVisitor(file_path)
+        visitor.visit(tree)
+
+        # Create CALLS relationships
+        for caller, callee, line in visitor.calls:
+            # Try to resolve callee to a qualified name in our entity map
+            callee_qualified = None
+
+            # Check if it's a direct reference to an entity in this file
+            for qname, entity in entity_map.items():
+                if entity.name == callee or qname.endswith(f"::{callee}"):
+                    callee_qualified = qname
+                    break
+
+            # If not found, use the callee name as-is (might be external)
+            if not callee_qualified:
+                callee_qualified = callee
+
+            relationships.append(
+                Relationship(
+                    source_id=caller,
+                    target_id=callee_qualified,
+                    rel_type=RelationshipType.CALLS,
+                    properties={"line": line, "call_name": callee},
+                )
+            )

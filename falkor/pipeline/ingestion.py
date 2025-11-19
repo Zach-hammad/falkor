@@ -108,17 +108,21 @@ class IngestionPipeline:
             id_mapping = self.db.batch_create_nodes(entities)
             logger.info(f"Created {len(id_mapping)} nodes")
 
-            # Convert relationships to use elementId
+            # Convert relationships to use elementId (create new objects to avoid mutation)
             for rel in relationships:
                 # Map qualified_name to elementId
                 source_id = id_mapping.get(rel.source_id, rel.source_id)
                 target_id = id_mapping.get(rel.target_id, rel.target_id)
 
-                # Update relationship with elementId values
-                rel.source_id = source_id
-                rel.target_id = target_id
+                # Create new relationship with resolved IDs
+                resolved_rel = Relationship(
+                    source_id=source_id,
+                    target_id=target_id,
+                    rel_type=rel.rel_type,
+                    properties=rel.properties,
+                )
 
-                self.db.create_relationship(rel)
+                self.db.create_relationship(resolved_rel)
 
             logger.info(f"Created {len(relationships)} relationships")
 
