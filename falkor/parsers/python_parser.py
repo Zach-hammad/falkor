@@ -615,7 +615,7 @@ class PythonParser(CodeParser):
                 child_class_qualified = f"{file_path}::{node.name}:{node.lineno}"
 
                 # Extract base classes
-                for base in node.bases:
+                for idx, base in enumerate(node.bases):
                     # Try to get the base class name
                     base_name = self._get_base_class_name(base)
                     if base_name:
@@ -638,6 +638,7 @@ class PythonParser(CodeParser):
                                 properties={
                                     "base_class": base_name,
                                     "line": node.lineno,
+                                    "order": idx,  # MRO order (important for multiple inheritance)
                                 },
                             )
                         )
