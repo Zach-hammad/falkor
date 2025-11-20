@@ -25,6 +25,9 @@ from repotoire.detectors.inappropriate_intimacy import InappropriateIntimacyDete
 # Hybrid detectors (external tool + graph)
 from repotoire.detectors.ruff_import_detector import RuffImportDetector
 from repotoire.detectors.mypy_detector import MypyDetector
+from repotoire.detectors.pylint_detector import PylintDetector
+from repotoire.detectors.bandit_detector import BanditDetector
+from repotoire.detectors.radon_detector import RadonDetector
 
 from repotoire.logging_config import get_logger, LogContext
 
@@ -74,6 +77,9 @@ class AnalysisEngine:
             # Hybrid detectors (external tool + graph)
             RuffImportDetector(neo4j_client, detector_config={"repository_path": repository_path}),
             MypyDetector(neo4j_client, detector_config={"repository_path": repository_path}),
+            PylintDetector(neo4j_client, detector_config={"repository_path": repository_path}),
+            BanditDetector(neo4j_client, detector_config={"repository_path": repository_path}),
+            RadonDetector(neo4j_client, detector_config={"repository_path": repository_path}),
         ]
 
     def analyze(self) -> CodebaseHealth:

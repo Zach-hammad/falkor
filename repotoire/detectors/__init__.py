@@ -17,6 +17,9 @@ from repotoire.detectors.truly_unused_imports import TrulyUnusedImportsDetector
 # Hybrid detectors (external tool + graph)
 from repotoire.detectors.ruff_import_detector import RuffImportDetector
 from repotoire.detectors.mypy_detector import MypyDetector
+from repotoire.detectors.pylint_detector import PylintDetector
+from repotoire.detectors.bandit_detector import BanditDetector
+from repotoire.detectors.radon_detector import RadonDetector
 
 __all__ = [
     "AnalysisEngine",
@@ -34,4 +37,7 @@ __all__ = [
     # Hybrid detectors
     "RuffImportDetector",
     "MypyDetector",
+    "PylintDetector",
+    "BanditDetector",
+    "RadonDetector",
 ]
