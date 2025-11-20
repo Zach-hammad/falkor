@@ -174,8 +174,18 @@ class MypyDetector(CodeSmellDetector):
         error_code = mypy_result.get("code", "misc")
         severity_str = mypy_result.get("severity", "error")
 
-        # Map relative path
-        rel_path = str(Path(file_path).relative_to(self.repository_path))
+        # Map relative path - handle both absolute and relative paths from mypy
+        file_path_obj = Path(file_path)
+        if file_path_obj.is_absolute():
+            # Absolute path: make it relative to repository
+            try:
+                rel_path = str(file_path_obj.relative_to(self.repository_path))
+            except ValueError:
+                # Path not within repository, use as-is
+                rel_path = file_path
+        else:
+            # Already relative: use as-is
+            rel_path = file_path
 
         # Enrich with graph data
         graph_data = self._get_graph_context(rel_path, line)
