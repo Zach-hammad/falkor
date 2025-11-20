@@ -412,3 +412,53 @@ def validate_neo4j_connection(uri: str, username: str, password: str) -> None:
             f"Failed to connect to Neo4j: {e}",
             "Check your Neo4j configuration and ensure the database is accessible"
         ) from e
+
+
+def validate_identifier(name: str, context: str = "identifier") -> str:
+    """Validate identifier is safe for use in Cypher queries.
+
+    Prevents Cypher injection by ensuring identifiers only contain
+    alphanumeric characters, underscores, and hyphens.
+
+    Args:
+        name: Identifier to validate (e.g., projection name, property name)
+        context: Description of what this identifier is used for (for error messages)
+
+    Returns:
+        Validated identifier string
+
+    Raises:
+        ValidationError: If identifier contains invalid characters
+
+    Examples:
+        >>> validate_identifier("my-projection", "projection name")
+        'my-projection'
+        >>> validate_identifier("test123_data", "graph name")
+        'test123_data'
+        >>> validate_identifier("bad'; DROP TABLE", "name")
+        ValidationError: Invalid name: bad'; DROP TABLE
+    """
+    if not name or not name.strip():
+        raise ValidationError(
+            f"{context.capitalize()} cannot be empty",
+            f"Provide a valid {context}"
+        )
+
+    # Allow alphanumeric, underscores, and hyphens only
+    # This prevents Cypher injection attacks
+    if not re.match(r'^[a-zA-Z0-9_-]+$', name):
+        raise ValidationError(
+            f"Invalid {context}: {name}",
+            f"{context.capitalize()} must contain only letters, numbers, underscores, and hyphens.\n"
+            f"This restriction prevents Cypher injection attacks.\n"
+            f"Examples of valid {context}s: 'my-projection', 'data_graph', 'test123'"
+        )
+
+    # Check length is reasonable (prevent DoS via extremely long names)
+    if len(name) > 100:
+        raise ValidationError(
+            f"{context.capitalize()} is too long: {len(name)} characters",
+            f"Use a shorter {context} (max 100 characters)"
+        )
+
+    return name

@@ -1,9 +1,5 @@
-"""AI services for semantic analysis and fix generation."""
+"""AI and NLP modules for semantic code analysis."""
 
-# TODO: Implement AI services
-# from falkor.ai.concepts import ConceptExtractor
-# from falkor.ai.summarization import SummaryGenerator
-# from falkor.ai.fixes import FixSuggestionGenerator
-# from falkor.ai.similarity import SimilarityCalculator
+from falkor.ai.spacy_clue_generator import SpacyClueGenerator
 
-__all__ = []
+__all__ = ["SpacyClueGenerator"]

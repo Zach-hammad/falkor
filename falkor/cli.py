@@ -17,6 +17,7 @@ from rich import box
 from falkor.pipeline import IngestionPipeline
 from falkor.graph import Neo4jClient
 from falkor.detectors import AnalysisEngine
+from falkor.migrations import MigrationManager, MigrationError
 from falkor.logging_config import configure_logging, get_logger, LogContext
 from falkor.config import load_config, FalkorConfig, ConfigError, generate_config_template, load_config_from_env
 from falkor.models import SecretsPolicy
@@ -164,6 +165,18 @@ def cli(ctx: click.Context, config: str | None, log_level: str | None, log_forma
     default=False,
     help="Disable progress bars and reduce output",
 )
+@click.option(
+    "--generate-clues",
+    is_flag=True,
+    default=False,
+    help="Generate AI-powered semantic clues (requires spaCy)",
+)
+@click.option(
+    "--batch-size",
+    type=int,
+    default=None,
+    help="Number of entities to batch before loading to graph (overrides config, default: 100)",
+)
 @click.pass_context
 def ingest(
     ctx: click.Context,
@@ -178,6 +191,8 @@ def ingest(
     incremental: bool,
     force_full: bool,
     quiet: bool,
+    generate_clues: bool,
+    batch_size: int | None,
 ) -> None:
     """Ingest a codebase into the knowledge graph with security validation.
 
@@ -203,6 +218,7 @@ def ingest(
         final_follow_symlinks = follow_symlinks if follow_symlinks is not None else config.ingestion.follow_symlinks
         final_max_file_size = max_file_size if max_file_size is not None else config.ingestion.max_file_size_mb
         final_secrets_policy_str = secrets_policy if secrets_policy is not None else config.secrets.policy
+        final_batch_size = batch_size if batch_size is not None else config.ingestion.batch_size
 
         # Convert secrets policy string to enum
         final_secrets_policy = SecretsPolicy(final_secrets_policy_str)
@@ -228,7 +244,7 @@ def ingest(
         final_max_file_size = validate_file_size_limit(final_max_file_size)
 
         # Validate batch size
-        validated_batch_size = validate_batch_size(config.ingestion.batch_size)
+        validated_batch_size = validate_batch_size(final_batch_size)
 
         # Validate retry configuration
         validated_retries = validate_retry_config(
@@ -247,7 +263,10 @@ def ingest(
     console.print(f"Repository: {repo_path}")
     console.print(f"Patterns: {', '.join(final_patterns)}")
     console.print(f"Follow symlinks: {final_follow_symlinks}")
-    console.print(f"Max file size: {final_max_file_size}MB\n")
+    console.print(f"Max file size: {final_max_file_size}MB")
+    if generate_clues:
+        console.print(f"[cyan]✨ AI Clue Generation: Enabled (spaCy)[/cyan]")
+    console.print()
 
     try:
         with LogContext(operation="ingest", repo_path=repo_path):
@@ -267,7 +286,8 @@ def ingest(
                     follow_symlinks=final_follow_symlinks,
                     max_file_size_mb=final_max_file_size,
                     batch_size=validated_batch_size,
-                    secrets_policy=final_secrets_policy
+                    secrets_policy=final_secrets_policy,
+                    generate_clues=generate_clues
                 )
 
                 # Setup progress bar if not in quiet mode
@@ -1009,6 +1029,874 @@ def init(format: str, output: str | None, force: bool) -> None:
     except Exception as e:
         console.print(f"[red]❌ Unexpected error: {e}[/red]")
         raise
+
+
+@cli.group()
+def migrate() -> None:
+    """Manage database schema migrations.
+
+    Schema migrations allow you to safely evolve the Neo4j database schema
+    over time with version tracking and rollback capabilities.
+
+    Examples:
+        falkor migrate status              # Show current migration state
+        falkor migrate up                  # Apply pending migrations
+        falkor migrate down --to-version 1 # Rollback to version 1
+    """
+    pass
+
+
+@migrate.command()
+@click.option(
+    "--neo4j-uri", default=None, help="Neo4j connection URI (overrides config)"
+)
+@click.option("--neo4j-user", default=None, help="Neo4j username (overrides config)")
+@click.option(
+    "--neo4j-password",
+    default=None,
+    help="Neo4j password (overrides config, prompts if not provided)",
+)
+@click.pass_context
+def status(
+    ctx: click.Context,
+    neo4j_uri: str | None,
+    neo4j_user: str | None,
+    neo4j_password: str | None,
+) -> None:
+    """Show current migration status and pending migrations."""
+    config: FalkorConfig = ctx.obj['config']
+
+    # Validate and get credentials
+    try:
+        final_neo4j_uri = validate_neo4j_uri(neo4j_uri or config.neo4j.uri)
+        final_neo4j_user = neo4j_user or config.neo4j.user
+        final_neo4j_password = neo4j_password or config.neo4j.password
+
+        if not final_neo4j_password:
+            final_neo4j_password = click.prompt("Neo4j password", hide_input=True)
+
+        final_neo4j_user, final_neo4j_password = validate_neo4j_credentials(
+            final_neo4j_user, final_neo4j_password
+        )
+
+    except ValidationError as e:
+        console.print(f"\n[red]❌ Validation Error:[/red] {e.message}")
+        if e.suggestion:
+            console.print(f"\n[yellow]{e.suggestion}[/yellow]")
+        raise click.Abort()
+
+    console.print(f"\n[bold cyan]🐉 Falkor Migration Status[/bold cyan]\n")
+
+    try:
+        with Neo4jClient(final_neo4j_uri, final_neo4j_user, final_neo4j_password) as db:
+            manager = MigrationManager(db)
+            status_info = manager.status()
+
+            # Current version panel
+            version_text = Text()
+            version_text.append("Current Version: ", style="bold")
+            version_text.append(str(status_info["current_version"]), style="bold cyan")
+            version_text.append(f"\nAvailable Migrations: {status_info['available_migrations']}", style="dim")
+            version_text.append(f"\nPending Migrations: {status_info['pending_migrations']}", style="dim")
+
+            console.print(
+                Panel(
+                    version_text,
+                    title="Schema Version",
+                    border_style="cyan",
+                    box=box.ROUNDED,
+                    padding=(1, 2),
+                )
+            )
+
+            # Pending migrations table
+            if status_info["pending"]:
+                pending_table = Table(title="⏳ Pending Migrations", box=box.ROUNDED)
+                pending_table.add_column("Version", style="cyan", justify="center")
+                pending_table.add_column("Description", style="white")
+
+                for migration in status_info["pending"]:
+                    pending_table.add_row(
+                        str(migration["version"]),
+                        migration["description"]
+                    )
+
+                console.print(pending_table)
+                console.print(f"\n[yellow]Run 'falkor migrate up' to apply pending migrations[/yellow]\n")
+            else:
+                console.print("[green]✓ Database schema is up to date[/green]\n")
+
+            # Migration history table
+            if status_info["history"]:
+                history_table = Table(title="📜 Migration History", box=box.ROUNDED)
+                history_table.add_column("Version", style="cyan", justify="center")
+                history_table.add_column("Description", style="white")
+                history_table.add_column("Applied At", style="dim")
+
+                for record in status_info["history"]:
+                    history_table.add_row(
+                        str(record["version"]),
+                        record["description"],
+                        record["applied_at"][:19] if record["applied_at"] else "N/A"
+                    )
+
+                console.print(history_table)
+
+    except MigrationError as e:
+        console.print(f"\n[red]❌ Migration Error:[/red] {e}")
+        raise click.Abort()
+    except Exception as e:
+        console.print(f"\n[red]❌ Unexpected error:[/red] {e}")
+        raise
+
+
+@migrate.command()
+@click.option(
+    "--neo4j-uri", default=None, help="Neo4j connection URI (overrides config)"
+)
+@click.option("--neo4j-user", default=None, help="Neo4j username (overrides config)")
+@click.option(
+    "--neo4j-password",
+    default=None,
+    help="Neo4j password (overrides config, prompts if not provided)",
+)
+@click.option(
+    "--to-version",
+    type=int,
+    default=None,
+    help="Target version to migrate to (default: latest)",
+)
+@click.pass_context
+def up(
+    ctx: click.Context,
+    neo4j_uri: str | None,
+    neo4j_user: str | None,
+    neo4j_password: str | None,
+    to_version: int | None,
+) -> None:
+    """Apply pending migrations to upgrade schema."""
+    config: FalkorConfig = ctx.obj['config']
+
+    # Validate and get credentials
+    try:
+        final_neo4j_uri = validate_neo4j_uri(neo4j_uri or config.neo4j.uri)
+        final_neo4j_user = neo4j_user or config.neo4j.user
+        final_neo4j_password = neo4j_password or config.neo4j.password
+
+        if not final_neo4j_password:
+            final_neo4j_password = click.prompt("Neo4j password", hide_input=True)
+
+        final_neo4j_user, final_neo4j_password = validate_neo4j_credentials(
+            final_neo4j_user, final_neo4j_password
+        )
+
+    except ValidationError as e:
+        console.print(f"\n[red]❌ Validation Error:[/red] {e.message}")
+        if e.suggestion:
+            console.print(f"\n[yellow]{e.suggestion}[/yellow]")
+        raise click.Abort()
+
+    console.print(f"\n[bold cyan]🐉 Falkor Migration: Upgrading Schema[/bold cyan]\n")
+
+    try:
+        with Neo4jClient(final_neo4j_uri, final_neo4j_user, final_neo4j_password) as db:
+            manager = MigrationManager(db)
+
+            # Show current state
+            current = manager.get_current_version()
+            console.print(f"Current version: [cyan]{current}[/cyan]")
+
+            if to_version:
+                console.print(f"Target version: [cyan]{to_version}[/cyan]\n")
+            else:
+                available = max(manager.migrations.keys()) if manager.migrations else 0
+                console.print(f"Target version: [cyan]{available}[/cyan] (latest)\n")
+
+            # Apply migrations
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                progress.add_task("[cyan]Applying migrations...", total=None)
+                manager.migrate(target_version=to_version)
+
+            console.print(f"\n[green]✓ Schema migration complete[/green]")
+
+            # Show new version
+            new_version = manager.get_current_version()
+            console.print(f"New version: [bold cyan]{new_version}[/bold cyan]\n")
+
+    except MigrationError as e:
+        console.print(f"\n[red]❌ Migration Error:[/red] {e}")
+        console.print("[yellow]⚠️  Schema may be in an inconsistent state[/yellow]")
+        raise click.Abort()
+    except Exception as e:
+        console.print(f"\n[red]❌ Unexpected error:[/red] {e}")
+        raise
+
+
+@migrate.command()
+@click.option(
+    "--neo4j-uri", default=None, help="Neo4j connection URI (overrides config)"
+)
+@click.option("--neo4j-user", default=None, help="Neo4j username (overrides config)")
+@click.option(
+    "--neo4j-password",
+    default=None,
+    help="Neo4j password (overrides config, prompts if not provided)",
+)
+@click.option(
+    "--to-version",
+    type=int,
+    required=True,
+    help="Target version to rollback to",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation prompt",
+)
+@click.pass_context
+def down(
+    ctx: click.Context,
+    neo4j_uri: str | None,
+    neo4j_user: str | None,
+    neo4j_password: str | None,
+    to_version: int,
+    force: bool,
+) -> None:
+    """Rollback migrations to a previous version.
+
+    WARNING: This operation may result in data loss. Use with caution!
+    """
+    config: FalkorConfig = ctx.obj['config']
+
+    # Validate and get credentials
+    try:
+        final_neo4j_uri = validate_neo4j_uri(neo4j_uri or config.neo4j.uri)
+        final_neo4j_user = neo4j_user or config.neo4j.user
+        final_neo4j_password = neo4j_password or config.neo4j.password
+
+        if not final_neo4j_password:
+            final_neo4j_password = click.prompt("Neo4j password", hide_input=True)
+
+        final_neo4j_user, final_neo4j_password = validate_neo4j_credentials(
+            final_neo4j_user, final_neo4j_password
+        )
+
+    except ValidationError as e:
+        console.print(f"\n[red]❌ Validation Error:[/red] {e.message}")
+        if e.suggestion:
+            console.print(f"\n[yellow]{e.suggestion}[/yellow]")
+        raise click.Abort()
+
+    console.print(f"\n[bold red]⚠️  Falkor Migration: Rollback Schema[/bold red]\n")
+
+    try:
+        with Neo4jClient(final_neo4j_uri, final_neo4j_user, final_neo4j_password) as db:
+            manager = MigrationManager(db)
+
+            # Show current state
+            current = manager.get_current_version()
+            console.print(f"Current version: [cyan]{current}[/cyan]")
+            console.print(f"Target version: [cyan]{to_version}[/cyan]\n")
+
+            if to_version >= current:
+                console.print(f"[yellow]⚠️  Target version {to_version} is not earlier than current version {current}[/yellow]")
+                console.print("[dim]Use 'falkor migrate up' to upgrade schema[/dim]")
+                return
+
+            # Confirm rollback
+            if not force:
+                console.print("[yellow]⚠️  WARNING: Rolling back migrations may result in data loss![/yellow]")
+                confirm = click.confirm(f"Are you sure you want to rollback to version {to_version}?", default=False)
+                if not confirm:
+                    console.print("\n[dim]Rollback cancelled[/dim]")
+                    return
+
+            # Rollback migrations
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                progress.add_task("[red]Rolling back migrations...", total=None)
+                manager.rollback(target_version=to_version)
+
+            console.print(f"\n[green]✓ Schema rollback complete[/green]")
+
+            # Show new version
+            new_version = manager.get_current_version()
+            console.print(f"New version: [bold cyan]{new_version}[/bold cyan]\n")
+
+    except MigrationError as e:
+        console.print(f"\n[red]❌ Migration Error:[/red] {e}")
+        console.print("[yellow]⚠️  Schema may be in an inconsistent state[/yellow]")
+        raise click.Abort()
+    except Exception as e:
+        console.print(f"\n[red]❌ Unexpected error:[/red] {e}")
+        raise
+
+
+@cli.command()
+@click.argument("repo_path", type=click.Path(exists=True))
+@click.option("--neo4j-uri", default=None, help="Neo4j connection URI")
+@click.option("--neo4j-user", default=None, help="Neo4j username")
+@click.option("--neo4j-password", default=None, help="Neo4j password")
+@click.option("--window", type=int, default=90, help="Time window in days (default: 90)")
+@click.option("--min-churn", type=int, default=5, help="Minimum modifications to qualify as hotspot (default: 5)")
+@click.pass_context
+def hotspots(ctx, repo_path: str, neo4j_uri, neo4j_user, neo4j_password, window: int, min_churn: int) -> None:
+    """Find code hotspots with high churn and complexity.
+
+    Analyzes Git history to find files with:
+    - High modification frequency (churn)
+    - Increasing complexity or coupling
+    - High risk scores requiring attention
+
+    Example:
+        falkor hotspots /path/to/repo --window 90 --min-churn 5
+    """
+    config = ctx.obj['config']
+
+    with console.status(f"[bold green]Finding code hotspots in last {window} days...", spinner="dots"):
+        try:
+            # Get Neo4j connection details
+            uri = neo4j_uri or config.neo4j.uri
+            user = neo4j_user or config.neo4j.user
+            password = neo4j_password or config.neo4j.password or click.prompt("Neo4j password", hide_input=True)
+
+            # Connect to Neo4j
+            client = Neo4jClient(uri=uri, username=user, password=password)
+
+            # Create temporal metrics analyzer
+            from falkor.detectors.temporal_metrics import TemporalMetrics
+            analyzer = TemporalMetrics(client)
+
+            # Find hotspots
+            hotspots_list = analyzer.find_code_hotspots(window_days=window, min_churn=min_churn)
+
+            if not hotspots_list:
+                console.print(f"\n[green]✓ No code hotspots found in the last {window} days![/green]")
+                console.print(f"[dim]This means no files have >{min_churn} modifications with increasing complexity[/dim]\n")
+                return
+
+            # Display hotspots table
+            console.print(f"\n[bold red]🔥 Code Hotspots[/bold red] (Last {window} days)\n")
+
+            table = Table(
+                title=f"{len(hotspots_list)} files need attention",
+                box=box.ROUNDED,
+                show_header=True,
+                header_style="bold red"
+            )
+            table.add_column("File", style="yellow", no_wrap=False)
+            table.add_column("Churn", justify="right", style="cyan")
+            table.add_column("Risk Score", justify="right", style="red")
+            table.add_column("Top Author", style="dim")
+
+            for hotspot in hotspots_list[:20]:  # Top 20
+                risk_indicator = "🔥" * min(int(hotspot.risk_score / 10), 5)
+                table.add_row(
+                    hotspot.file_path,
+                    str(hotspot.churn_count),
+                    f"{risk_indicator} {hotspot.risk_score:.1f}",
+                    hotspot.top_authors[0] if hotspot.top_authors else "N/A"
+                )
+
+            console.print(table)
+            console.print(f"\n[dim]These files have high modification frequency and increasing complexity[/dim]")
+            console.print(f"[dim]Consider refactoring to reduce technical debt[/dim]\n")
+
+        except Exception as e:
+            logger.error(f"Failed to find code hotspots: {e}", exc_info=True)
+            console.print(f"\n[red]❌ Error:[/red] {e}")
+            raise click.Abort()
+
+
+@cli.command()
+@click.argument("repo_path", type=click.Path(exists=True))
+@click.option("--neo4j-uri", default=None, help="Neo4j connection URI")
+@click.option("--neo4j-user", default=None, help="Neo4j username")
+@click.option("--neo4j-password", default=None, help="Neo4j password")
+@click.option("--strategy", type=click.Choice(["recent", "all", "milestones"]), default="recent", help="Commit selection strategy")
+@click.option("--max-commits", type=int, default=10, help="Maximum commits to analyze (default: 10)")
+@click.option("--branch", default="HEAD", help="Branch to analyze (default: HEAD)")
+@click.option("--generate-clues", is_flag=True, default=False, help="Generate semantic clues for each commit")
+@click.pass_context
+def history(ctx, repo_path: str, neo4j_uri, neo4j_user, neo4j_password, strategy: str, max_commits: int, branch: str, generate_clues: bool) -> None:
+    """Ingest Git history for temporal analysis.
+
+    Analyzes code evolution across Git commits to track:
+    - Metric trends over time
+    - Code quality degradation
+    - Technical debt velocity
+
+    Strategies:
+      recent      - Last N commits (default, fast)
+      milestones  - Tagged releases only
+      all         - All commits (expensive)
+
+    Example:
+        falkor history /path/to/repo --strategy recent --max-commits 10
+    """
+    config = ctx.obj['config']
+
+    console.print(f"\n[bold cyan]📊 Temporal Code Analysis[/bold cyan]\n")
+    console.print(f"Repository: [yellow]{repo_path}[/yellow]")
+    console.print(f"Strategy: [cyan]{strategy}[/cyan]")
+    console.print(f"Max commits: [cyan]{max_commits}[/cyan]\n")
+
+    try:
+        # Get Neo4j connection details
+        uri = neo4j_uri or config.neo4j.uri
+        user = neo4j_user or config.neo4j.user
+        password = neo4j_password or config.neo4j.password or click.prompt("Neo4j password", hide_input=True)
+
+        # Connect to Neo4j
+        client = Neo4jClient(uri=uri, username=user, password=password)
+
+        # Create temporal ingestion pipeline
+        from falkor.pipeline.temporal_ingestion import TemporalIngestionPipeline
+        pipeline = TemporalIngestionPipeline(
+            repo_path=repo_path,
+            neo4j_client=client,
+            generate_clues=generate_clues
+        )
+
+        # Ingest with history
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task(f"[cyan]Ingesting {strategy} commits...", total=None)
+
+            result = pipeline.ingest_with_history(
+                strategy=strategy,
+                max_commits=max_commits,
+                branch=branch
+            )
+
+            progress.update(task, completed=True)
+
+        # Display results
+        console.print(f"\n[green]✓ Temporal ingestion complete![/green]\n")
+
+        results_table = Table(box=box.SIMPLE, show_header=False)
+        results_table.add_column("Metric", style="bold")
+        results_table.add_column("Value", style="cyan")
+
+        results_table.add_row("Sessions created", str(result["sessions_created"]))
+        results_table.add_row("Entities created", str(result["entities_created"]))
+        results_table.add_row("Relationships created", str(result["relationships_created"]))
+        results_table.add_row("Commits processed", str(result["commits_processed"]))
+
+        console.print(results_table)
+        console.print()
+
+    except Exception as e:
+        logger.error(f"Failed to ingest history: {e}", exc_info=True)
+        console.print(f"\n[red]❌ Error:[/red] {e}")
+        raise click.Abort()
+
+
+@cli.command()
+@click.argument("before_commit")
+@click.argument("after_commit")
+@click.option("--neo4j-uri", default=None, help="Neo4j connection URI")
+@click.option("--neo4j-user", default=None, help="Neo4j username")
+@click.option("--neo4j-password", default=None, help="Neo4j password")
+@click.pass_context
+def compare(ctx, before_commit: str, after_commit: str, neo4j_uri, neo4j_user, neo4j_password) -> None:
+    """Compare code metrics between two commits.
+
+    Shows how code quality metrics changed between commits:
+    - Improvements (metrics got better)
+    - Regressions (metrics got worse)
+    - Percentage changes
+
+    Example:
+        falkor compare abc123 def456
+    """
+    config = ctx.obj['config']
+
+    try:
+        # Get Neo4j connection details
+        uri = neo4j_uri or config.neo4j.uri
+        user = neo4j_user or config.neo4j.user
+        password = neo4j_password or config.neo4j.password or click.prompt("Neo4j password", hide_input=True)
+
+        # Connect to Neo4j
+        client = Neo4jClient(uri=uri, username=user, password=password)
+
+        # Create temporal metrics analyzer
+        from falkor.detectors.temporal_metrics import TemporalMetrics
+        analyzer = TemporalMetrics(client)
+
+        with console.status(f"[bold green]Comparing commits {before_commit[:7]} → {after_commit[:7]}...", spinner="dots"):
+            comparison = analyzer.compare_commits(before_commit, after_commit)
+
+        if not comparison:
+            console.print(f"\n[yellow]⚠️  Could not find sessions for commits {before_commit[:7]} and {after_commit[:7]}[/yellow]")
+            console.print("[dim]Make sure you've run 'falkor history' first to ingest commit data[/dim]\n")
+            return
+
+        # Display comparison
+        console.print(f"\n[bold cyan]📊 Commit Comparison[/bold cyan]\n")
+        console.print(f"Before: [yellow]{comparison['before_commit']}[/yellow]  ({comparison['before_date']})")
+        console.print(f"After:  [yellow]{comparison['after_commit']}[/yellow]  ({comparison['after_date']})\n")
+
+        # Show improvements
+        if comparison["improvements"]:
+            console.print("[bold green]✓ Improvements:[/bold green]")
+            for metric in comparison["improvements"]:
+                change = comparison["changes"][metric]
+                console.print(f"  • {metric}: {change['before']:.2f} → {change['after']:.2f} ({change['change_percentage']:+.1f}%)")
+            console.print()
+
+        # Show regressions
+        if comparison["regressions"]:
+            console.print("[bold red]⚠️  Regressions:[/bold red]")
+            for metric in comparison["regressions"]:
+                change = comparison["changes"][metric]
+                console.print(f"  • {metric}: {change['before']:.2f} → {change['after']:.2f} ({change['change_percentage']:+.1f}%)")
+            console.print()
+
+        # Overall assessment
+        if len(comparison["improvements"]) > len(comparison["regressions"]):
+            console.print("[green]Overall: Code quality improved ✓[/green]")
+        elif len(comparison["regressions"]) > len(comparison["improvements"]):
+            console.print("[red]Overall: Code quality degraded ⚠️[/red]")
+        else:
+            console.print("[yellow]Overall: Mixed changes[/yellow]")
+
+        console.print()
+
+    except Exception as e:
+        logger.error(f"Failed to compare commits: {e}", exc_info=True)
+        console.print(f"\n[red]❌ Error:[/red] {e}")
+        raise click.Abort()
+
+
+@cli.group()
+def schema() -> None:
+    """Manage and inspect graph schema.
+
+    Tools for exploring the Neo4j graph structure, validating integrity,
+    and debugging without opening Neo4j Browser.
+
+    Examples:
+        falkor schema inspect           # Show graph statistics
+        falkor schema visualize         # ASCII art graph structure
+        falkor schema sample Class --limit 3  # Sample Class nodes
+        falkor schema validate          # Check schema integrity
+    """
+    pass
+
+
+@schema.command()
+@click.option("--neo4j-uri", default=None, help="Neo4j connection URI (overrides config)")
+@click.option("--neo4j-user", default=None, help="Neo4j username (overrides config)")
+@click.option("--neo4j-password", default=None, help="Neo4j password (overrides config)")
+@click.option("--format", type=click.Choice(["table", "json"]), default="table", help="Output format")
+@click.pass_context
+def inspect(
+    ctx: click.Context,
+    neo4j_uri: str | None,
+    neo4j_user: str | None,
+    neo4j_password: str | None,
+    format: str,
+) -> None:
+    """Show graph statistics and schema overview."""
+    try:
+        config = get_config()
+
+        # Override config with CLI args
+        uri = neo4j_uri or config.neo4j_uri
+        user = neo4j_user or config.neo4j_user
+        password = neo4j_password or config.neo4j_password
+
+        if not password:
+            password = click.prompt("Neo4j password", hide_input=True)
+
+        # Connect to Neo4j
+        client = Neo4jClient(uri=uri, user=user, password=password)
+
+        # Get statistics
+        stats = client.get_stats()
+        node_counts = client.get_node_label_counts()
+        rel_counts = client.get_relationship_type_counts()
+
+        if format == "json":
+            import json
+            output = {
+                "total_nodes": stats.get("total_nodes", 0),
+                "total_relationships": stats.get("total_relationships", 0),
+                "node_types": node_counts,
+                "relationship_types": rel_counts,
+            }
+            console.print(json.dumps(output, indent=2))
+        else:
+            # Create panel with overview
+            panel_content = f"[bold]Total Nodes:[/bold] {stats.get('total_nodes', 0):,}\n"
+            panel_content += f"[bold]Total Relationships:[/bold] {stats.get('total_relationships', 0):,}\n"
+
+            panel = Panel(
+                panel_content,
+                title="Graph Schema Overview",
+                border_style="cyan",
+                box=box.ROUNDED,
+            )
+            console.print(panel)
+            console.print()
+
+            # Node types table
+            node_table = Table(title="Node Types", box=box.ROUNDED, show_header=True, header_style="bold cyan")
+            node_table.add_column("Type", style="cyan")
+            node_table.add_column("Count", justify="right", style="green")
+
+            for label, count in node_counts.items():
+                node_table.add_row(label, f"{count:,}")
+
+            console.print(node_table)
+            console.print()
+
+            # Relationship types table
+            rel_table = Table(title="Relationship Types", box=box.ROUNDED, show_header=True, header_style="bold magenta")
+            rel_table.add_column("Type", style="magenta")
+            rel_table.add_column("Count", justify="right", style="green")
+
+            for rel_type, count in rel_counts.items():
+                rel_table.add_row(rel_type, f"{count:,}")
+
+            console.print(rel_table)
+
+        client.close()
+
+    except Exception as e:
+        logger.error(f"Failed to inspect schema: {e}", exc_info=True)
+        console.print(f"\n[red]❌ Error:[/red] {e}")
+        raise click.Abort()
+
+
+@schema.command()
+@click.option("--neo4j-uri", default=None, help="Neo4j connection URI (overrides config)")
+@click.option("--neo4j-user", default=None, help="Neo4j username (overrides config)")
+@click.option("--neo4j-password", default=None, help="Neo4j password (overrides config)")
+@click.pass_context
+def visualize(
+    ctx: click.Context,
+    neo4j_uri: str | None,
+    neo4j_user: str | None,
+    neo4j_password: str | None,
+) -> None:
+    """Visualize graph schema structure with ASCII art."""
+    try:
+        config = get_config()
+
+        # Override config with CLI args
+        uri = neo4j_uri or config.neo4j_uri
+        user = neo4j_user or config.neo4j_user
+        password = neo4j_password or config.neo4j_password
+
+        if not password:
+            password = click.prompt("Neo4j password", hide_input=True)
+
+        # Connect to Neo4j
+        client = Neo4jClient(uri=uri, user=user, password=password)
+
+        # Get relationship type counts to understand schema
+        rel_counts = client.get_relationship_type_counts()
+
+        # Create ASCII art visualization
+        console.print()
+        console.print("[bold cyan]Graph Schema Structure[/bold cyan]")
+        console.print()
+
+        # Build schema tree
+        tree = Tree("🗂️  [bold cyan](File)[/bold cyan]", guide_style="cyan")
+
+        if "CONTAINS" in rel_counts:
+            contains_branch = tree.add("│")
+            contains_branch.add("├─[[bold magenta]CONTAINS[/bold magenta]]─> [bold yellow](Class)[/bold yellow]")
+            class_branch = contains_branch.add("│")
+
+            if "INHERITS" in rel_counts:
+                class_branch.add("  ├─[[bold magenta]INHERITS[/bold magenta]]─> [bold yellow](Class)[/bold yellow]")
+
+            class_branch.add("  └─[[bold magenta]DEFINES[/bold magenta]]─> [bold green](Function)[/bold green]")
+
+            func_branch = tree.add("│")
+            func_branch.add("├─[[bold magenta]CONTAINS[/bold magenta]]─> [bold green](Function)[/bold green]")
+
+            if "CALLS" in rel_counts:
+                func_sub = func_branch.add("│")
+                func_sub.add("  └─[[bold magenta]CALLS[/bold magenta]]─> [bold green](Function)[/bold green]")
+
+        if "IMPORTS" in rel_counts:
+            tree.add("│")
+            tree.add("└─[[bold magenta]IMPORTS[/bold magenta]]───> [bold cyan](File)[/bold cyan]")
+
+        console.print(tree)
+        console.print()
+
+        # Print relationship stats
+        console.print("[bold]Relationship Counts:[/bold]")
+        for rel_type, count in rel_counts.items():
+            console.print(f"  • {rel_type}: {count:,}")
+
+        console.print()
+        client.close()
+
+    except Exception as e:
+        logger.error(f"Failed to visualize schema: {e}", exc_info=True)
+        console.print(f"\n[red]❌ Error:[/red] {e}")
+        raise click.Abort()
+
+
+@schema.command()
+@click.argument("node_type")
+@click.option("--limit", default=3, help="Number of samples to show")
+@click.option("--neo4j-uri", default=None, help="Neo4j connection URI (overrides config)")
+@click.option("--neo4j-user", default=None, help="Neo4j username (overrides config)")
+@click.option("--neo4j-password", default=None, help="Neo4j password (overrides config)")
+@click.pass_context
+def sample(
+    ctx: click.Context,
+    node_type: str,
+    limit: int,
+    neo4j_uri: str | None,
+    neo4j_user: str | None,
+    neo4j_password: str | None,
+) -> None:
+    """Show sample nodes of a specific type.
+
+    NODE_TYPE: The node label to sample (e.g., Class, Function, File)
+    """
+    try:
+        config = get_config()
+
+        # Override config with CLI args
+        uri = neo4j_uri or config.neo4j_uri
+        user = neo4j_user or config.neo4j_user
+        password = neo4j_password or config.neo4j_password
+
+        if not password:
+            password = click.prompt("Neo4j password", hide_input=True)
+
+        # Connect to Neo4j
+        client = Neo4jClient(uri=uri, user=user, password=password)
+
+        # Get total count
+        node_counts = client.get_node_label_counts()
+        total_count = node_counts.get(node_type, 0)
+
+        if total_count == 0:
+            console.print(f"[yellow]No nodes of type '{node_type}' found[/yellow]")
+            client.close()
+            return
+
+        # Get samples
+        samples = client.sample_nodes(node_type, limit)
+
+        # Display samples
+        console.print()
+        panel_title = f"Sample {node_type} Nodes ({min(limit, len(samples))} of {total_count:,})"
+
+        sample_text = ""
+        for i, props in enumerate(samples, 1):
+            sample_text += f"\n[bold cyan]{i}. {props.get('qualifiedName', props.get('filePath', 'Unknown'))}[/bold cyan]\n"
+
+            # Show key properties
+            for key, value in sorted(props.items()):
+                if key not in ['qualifiedName', 'filePath'] and value is not None:
+                    # Truncate long values
+                    str_val = str(value)
+                    if len(str_val) > 100:
+                        str_val = str_val[:97] + "..."
+                    sample_text += f"   [dim]• {key}:[/dim] {str_val}\n"
+
+            if i < len(samples):
+                sample_text += "\n"
+
+        panel = Panel(
+            sample_text.strip(),
+            title=panel_title,
+            border_style="cyan",
+            box=box.ROUNDED,
+        )
+        console.print(panel)
+        console.print()
+
+        client.close()
+
+    except Exception as e:
+        logger.error(f"Failed to sample nodes: {e}", exc_info=True)
+        console.print(f"\n[red]❌ Error:[/red] {e}")
+        raise click.Abort()
+
+
+@schema.command()
+@click.option("--neo4j-uri", default=None, help="Neo4j connection URI (overrides config)")
+@click.option("--neo4j-user", default=None, help="Neo4j username (overrides config)")
+@click.option("--neo4j-password", default=None, help="Neo4j password (overrides config)")
+@click.pass_context
+def validate(
+    ctx: click.Context,
+    neo4j_uri: str | None,
+    neo4j_user: str | None,
+    neo4j_password: str | None,
+) -> None:
+    """Validate graph schema integrity."""
+    try:
+        config = get_config()
+
+        # Override config with CLI args
+        uri = neo4j_uri or config.neo4j_uri
+        user = neo4j_user or config.neo4j_user
+        password = neo4j_password or config.neo4j_password
+
+        if not password:
+            password = click.prompt("Neo4j password", hide_input=True)
+
+        # Connect to Neo4j
+        client = Neo4jClient(uri=uri, user=user, password=password)
+
+        console.print()
+        console.print("[bold cyan]Validating Graph Schema...[/bold cyan]")
+        console.print()
+
+        # Run validation
+        validation = client.validate_schema_integrity()
+
+        if validation["valid"]:
+            console.print("[green]✓ Schema validation passed[/green]")
+            console.print("[green]✓ All integrity checks passed[/green]")
+        else:
+            console.print("[red]✗ Schema validation failed[/red]")
+            console.print()
+            console.print("[bold]Issues Found:[/bold]")
+
+            for issue_type, count in validation["issues"].items():
+                issue_name = issue_type.replace("_", " ").title()
+                console.print(f"  [red]✗[/red] {issue_name}: {count:,}")
+
+            console.print()
+            console.print("[yellow]Run 'falkor schema inspect' for more details[/yellow]")
+
+        console.print()
+        client.close()
+
+    except Exception as e:
+        logger.error(f"Failed to validate schema: {e}", exc_info=True)
+        console.print(f"\n[red]❌ Error:[/red] {e}")
+        raise click.Abort()
 
 
 def main() -> None:

@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Callable
 
 from falkor.graph import Neo4jClient, GraphSchema
 from falkor.parsers import CodeParser, PythonParser
-from falkor.models import Entity, Relationship, SecretsPolicy
+from falkor.models import Entity, Relationship, SecretsPolicy, RelationshipType
 from falkor.logging_config import get_logger, LogContext, log_operation
 
 logger = get_logger(__name__)
@@ -32,7 +32,8 @@ class IngestionPipeline:
         follow_symlinks: bool = DEFAULT_FOLLOW_SYMLINKS,
         max_file_size_mb: float = MAX_FILE_SIZE_MB,
         batch_size: int = DEFAULT_BATCH_SIZE,
-        secrets_policy: SecretsPolicy = SecretsPolicy.REDACT
+        secrets_policy: SecretsPolicy = SecretsPolicy.REDACT,
+        generate_clues: bool = False
     ):
         """Initialize ingestion pipeline with security validation.
 
@@ -43,6 +44,7 @@ class IngestionPipeline:
             max_file_size_mb: Maximum file size in MB to process (default: 10MB)
             batch_size: Number of entities to batch before loading to graph (default: 100)
             secrets_policy: Policy for handling detected secrets (default: REDACT)
+            generate_clues: Whether to generate AI semantic clues (default: False)
 
         Raises:
             ValueError: If repository path is invalid
@@ -68,9 +70,22 @@ class IngestionPipeline:
         self.max_file_size_mb = max_file_size_mb
         self.batch_size = batch_size
         self.secrets_policy = secrets_policy
+        self.generate_clues = generate_clues
 
         # Track skipped files for reporting
         self.skipped_files: List[Dict[str, str]] = []
+
+        # Initialize clue generator if needed
+        self.clue_generator = None
+        if self.generate_clues:
+            try:
+                from falkor.ai import SpacyClueGenerator
+                self.clue_generator = SpacyClueGenerator()
+                logger.info("Clue generation enabled (using spaCy)")
+            except Exception as e:
+                logger.warning(f"Could not initialize clue generator: {e}")
+                logger.warning("Continuing without clue generation")
+                self.generate_clues = False
 
         # Register default parsers with secrets policy
         self.register_parser("python", PythonParser(secrets_policy=secrets_policy))
@@ -283,6 +298,50 @@ class IngestionPipeline:
             })
             return [], []
 
+    def _generate_clues_for_entities(
+        self, entities: List[Entity]
+    ) -> tuple[List[Entity], List[Relationship]]:
+        """Generate semantic clues for entities.
+
+        Args:
+            entities: List of entities to generate clues for
+
+        Returns:
+            Tuple of (clue_entities, describes_relationships)
+        """
+        if not self.generate_clues or not self.clue_generator:
+            return [], []
+
+        clue_entities = []
+        describes_relationships = []
+
+        for entity in entities:
+            try:
+                # Generate clues for this entity
+                clues = self.clue_generator.generate_clues(entity)
+
+                for clue in clues:
+                    clue_entities.append(clue)
+
+                    # Create DESCRIBES relationship from clue to target entity
+                    describes_rel = Relationship(
+                        from_node=clue.qualified_name,
+                        to_node=entity.qualified_name,
+                        rel_type=RelationshipType.DESCRIBES,
+                        properties={
+                            "clue_type": clue.clue_type,
+                            "confidence": clue.confidence,
+                            "generated_by": clue.generated_by
+                        }
+                    )
+                    describes_relationships.append(describes_rel)
+
+            except Exception as e:
+                logger.warning(f"Failed to generate clues for {entity.qualified_name}: {e}")
+
+        logger.debug(f"Generated {len(clue_entities)} clues for {len(entities)} entities")
+        return clue_entities, describes_relationships
+
     def load_to_graph(
         self, entities: List[Entity], relationships: List[Relationship]
     ) -> None:
@@ -424,6 +483,12 @@ class IngestionPipeline:
                     files_processed += 1
                     all_entities.extend(entities)
                     all_relationships.extend(relationships)
+
+                    # Generate semantic clues if enabled
+                    if self.generate_clues:
+                        clue_entities, clue_relationships = self._generate_clues_for_entities(entities)
+                        all_entities.extend(clue_entities)
+                        all_relationships.extend(clue_relationships)
                 else:
                     files_failed += 1
 
@@ -449,6 +514,12 @@ class IngestionPipeline:
                 "entities": len(all_entities),
                 "relationships": len(all_relationships)
             })
+
+        # Post-processing: Fix up cross-file IMPORTS relationships
+        with LogContext(operation="fix_imports"):
+            fixed_count = self._fix_cross_file_imports()
+            if fixed_count > 0:
+                logger.info(f"Fixed {fixed_count} cross-file IMPORTS relationships")
 
         # Show stats
         stats = self.db.get_stats()
