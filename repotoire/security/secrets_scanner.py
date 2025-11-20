@@ -71,6 +71,40 @@ class SecretsScanner:
         self.settings = default_settings
         logger.debug("Initialized SecretsScanner with detect-secrets")
 
+    def _create_secret_match(
+        self,
+        secret_type: str,
+        plugin_name: str,
+        line: str,
+        line_num: int,
+        context: str,
+        filename: str
+    ) -> SecretMatch:
+        """Helper to create a SecretMatch with common parameters.
+
+        Args:
+            secret_type: Type of secret detected
+            plugin_name: Name of detection plugin
+            line: Line containing the secret
+            line_num: Line number in file
+            context: Context string
+            filename: Filename for reporting
+
+        Returns:
+            SecretMatch instance
+        """
+        match = SecretMatch(
+            secret_type=secret_type,
+            start_index=0,
+            end_index=len(line),
+            context=context,
+            filename=filename,
+            line_number=line_num,
+            plugin_name=plugin_name
+        )
+        logger.warning(f"Secret detected: {secret_type} at {context}")
+        return match
+
     def scan_string(
         self,
         text: str,
@@ -108,73 +142,43 @@ class SecretsScanner:
             # Check each pattern
             # AWS Keys
             if re.search(r'AKIA[A-Z0-9]{16}', line):
-                match = SecretMatch(
-                    secret_type="AWS Access Key",
-                    start_index=0,
-                    end_index=len(line),
-                    context=context,
-                    filename=filename,
-                    line_number=line_num,
-                    plugin_name="AWSKeyDetector"
+                match = self._create_secret_match(
+                    "AWS Access Key", "AWSKeyDetector",
+                    line, line_num, context, filename
                 )
                 secret_matches.append(match)
-                logger.warning(f"Secret detected: {match.secret_type} at {match.context}")
 
             # JWT Tokens
             if re.search(r'eyJ[A-Za-z0-9-_=]+\.eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_.+/=]*', line):
-                match = SecretMatch(
-                    secret_type="JWT Token",
-                    start_index=0,
-                    end_index=len(line),
-                    context=context,
-                    filename=filename,
-                    line_number=line_num,
-                    plugin_name="JWTDetector"
+                match = self._create_secret_match(
+                    "JWT Token", "JWTDetector",
+                    line, line_num, context, filename
                 )
                 secret_matches.append(match)
-                logger.warning(f"Secret detected: {match.secret_type} at {match.context}")
 
             # GitHub Tokens
             if re.search(r'ghp_[A-Za-z0-9]{36}', line):
-                match = SecretMatch(
-                    secret_type="GitHub Token",
-                    start_index=0,
-                    end_index=len(line),
-                    context=context,
-                    filename=filename,
-                    line_number=line_num,
-                    plugin_name="GitHubTokenDetector"
+                match = self._create_secret_match(
+                    "GitHub Token", "GitHubTokenDetector",
+                    line, line_num, context, filename
                 )
                 secret_matches.append(match)
-                logger.warning(f"Secret detected: {match.secret_type} at {match.context}")
 
             # Private Keys
             if re.search(r'-----BEGIN .* PRIVATE KEY-----', line):
-                match = SecretMatch(
-                    secret_type="Private Key",
-                    start_index=0,
-                    end_index=len(line),
-                    context=context,
-                    filename=filename,
-                    line_number=line_num,
-                    plugin_name="PrivateKeyDetector"
+                match = self._create_secret_match(
+                    "Private Key", "PrivateKeyDetector",
+                    line, line_num, context, filename
                 )
                 secret_matches.append(match)
-                logger.warning(f"Secret detected: {match.secret_type} at {match.context}")
 
             # Slack Tokens
             if re.search(r'xox[baprs]-[A-Za-z0-9-]+', line):
-                match = SecretMatch(
-                    secret_type="Slack Token",
-                    start_index=0,
-                    end_index=len(line),
-                    context=context,
-                    filename=filename,
-                    line_number=line_num,
-                    plugin_name="SlackTokenDetector"
+                match = self._create_secret_match(
+                    "Slack Token", "SlackTokenDetector",
+                    line, line_num, context, filename
                 )
                 secret_matches.append(match)
-                logger.warning(f"Secret detected: {match.secret_type} at {match.context}")
 
         # Redact secrets if found
         redacted_text = text
