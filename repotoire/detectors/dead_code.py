@@ -172,6 +172,11 @@ class DeadCodeDetector(CodeSmellDetector):
             if any(pattern in name.lower() for pattern in ["to_dict", "to_json", "from_dict", "from_json", "serialize", "deserialize"]):
                 continue
 
+            # Filter out pytest/mock side_effect functions (common pattern in tests)
+            # These are assigned to mock.side_effect which the detector doesn't track
+            if name.endswith("_side_effect") or name.endswith("_effect"):
+                continue
+
             # Filter out common internal helper method patterns
             # These are private methods that are almost always called internally
             # but may not have CALLS relationships due to incomplete extraction

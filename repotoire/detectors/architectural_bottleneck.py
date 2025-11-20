@@ -171,7 +171,7 @@ class ArchitecturalBottleneckDetector(CodeSmellDetector):
                     affected_nodes=[qualified_name],
                     affected_files=[file_path],
                     suggested_fix=suggested_fix,
-                    metadata={
+                    graph_context={
                         "betweenness_score": betweenness,
                         "complexity": complexity,
                         "percentile": percentile,

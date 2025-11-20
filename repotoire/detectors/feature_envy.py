@@ -23,8 +23,20 @@ class FeatureEnvyDetector(CodeSmellDetector):
     def __init__(self, neo4j_client: Neo4jClient, detector_config: Optional[Dict[str, Any]] = None):
         super().__init__(neo4j_client)
         config = detector_config or {}
-        self.threshold_ratio = config.get("threshold_ratio", 2.0)
-        self.min_external_uses = config.get("min_external_uses", 3)
+
+        # Updated thresholds for v1.0 (REPO-116 tuning)
+        # Reduced false positives by requiring higher thresholds
+        self.threshold_ratio = config.get("threshold_ratio", 3.0)  # Was 2.0
+        self.min_external_uses = config.get("min_external_uses", 15)  # Was 3
+
+        # Severity-specific thresholds
+        self.critical_ratio = config.get("critical_ratio", 10.0)
+        self.critical_min_uses = config.get("critical_min_uses", 30)
+        self.high_ratio = config.get("high_ratio", 5.0)
+        self.high_min_uses = config.get("high_min_uses", 20)
+        self.medium_ratio = config.get("medium_ratio", 3.0)
+        self.medium_min_uses = config.get("medium_min_uses", 10)
+
         self.logger = get_logger(__name__)
 
     def detect(self) -> List[Finding]:
@@ -86,10 +98,15 @@ class FeatureEnvyDetector(CodeSmellDetector):
                 else float("inf")
             )
 
-            # Determine severity based on ratio
-            if ratio > 5.0 or result["internal_uses"] == 0:
+            # Determine severity based on ratio AND absolute external uses
+            # This reduces false positives from methods with few external dependencies
+            external = result["external_uses"]
+
+            if ratio >= self.critical_ratio and external >= self.critical_min_uses:
+                severity = Severity.CRITICAL
+            elif ratio >= self.high_ratio and external >= self.high_min_uses:
                 severity = Severity.HIGH
-            elif ratio > 3.0:
+            elif ratio >= self.medium_ratio and external >= self.medium_min_uses:
                 severity = Severity.MEDIUM
             else:
                 severity = Severity.LOW

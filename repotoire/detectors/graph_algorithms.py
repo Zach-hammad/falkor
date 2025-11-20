@@ -170,7 +170,7 @@ class GraphAlgorithms:
             f.complexity as complexity,
             f.loc as loc,
             f.filePath as file_path,
-            f.line_start as line_number
+            f.lineStart as line_number
         ORDER BY f.betweenness_score DESC
         LIMIT $limit
         """
@@ -241,7 +241,7 @@ class GraphAlgorithms:
             f.qualifiedName as qualified_name,
             f.name as name,
             f.filePath as file_path,
-            f.line_start as line_number
+            f.lineStart as line_number
         ORDER BY f.qualifiedName
         """
         return self.client.execute_query(query)
