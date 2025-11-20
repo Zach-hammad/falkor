@@ -53,6 +53,8 @@ class NodeType(str, Enum):
         CLASS: Class definition
         FUNCTION: Function or method definition
         CONCEPT: Semantic concept extracted by NLP/AI
+        CLUE: AI-generated semantic summary or insight about code
+        SESSION: Git commit snapshot representing code at a point in time
         IMPORT: Import statement
         VARIABLE: Variable or parameter
         ATTRIBUTE: Class or instance attribute
@@ -68,6 +70,8 @@ class NodeType(str, Enum):
     CLASS = "Class"
     FUNCTION = "Function"
     CONCEPT = "Concept"
+    CLUE = "Clue"
+    SESSION = "Session"
     IMPORT = "Import"
     VARIABLE = "Variable"
     ATTRIBUTE = "Attribute"
@@ -90,8 +94,9 @@ class RelationshipType(str, Enum):
         DEFINES: Entity defines a concept or type
         DESCRIBES: Documentation describes an entity
         MENTIONS: Documentation mentions an entity
-        PARENT_OF: Parent-child relationship (e.g., class to method)
-        MODIFIED: Entity was modified in a commit
+        PARENT_OF: Parent-child relationship (e.g., session to session, class to method)
+        CONTAINS_SNAPSHOT: Session contains a snapshot of an entity at a point in time
+        MODIFIED: Entity was modified in a commit/session
         VERSION_AT: Entity exists at a specific version
         RELATED_TO: General semantic relationship
 
@@ -112,6 +117,7 @@ class RelationshipType(str, Enum):
     DESCRIBES = "DESCRIBES"
     MENTIONS = "MENTIONS"
     PARENT_OF = "PARENT_OF"
+    CONTAINS_SNAPSHOT = "CONTAINS_SNAPSHOT"
     MODIFIED = "MODIFIED"
     VERSION_AT = "VERSION_AT"
     RELATED_TO = "RELATED_TO"
@@ -192,6 +198,8 @@ class FileEntity(Entity):
         hash: MD5 hash of file contents for change detection
         last_modified: Last modification timestamp for incremental ingestion
         exports: List of symbols exported via __all__ or similar
+        module_path: Python module path (e.g., "falkor.parsers.python_parser")
+        is_test: True if this is a test file
 
     Example:
         >>> file = FileEntity(
@@ -204,7 +212,9 @@ class FileEntity(Entity):
         ...     loc=120,
         ...     hash="a1b2c3d4e5f6",
         ...     last_modified=datetime.now(),
-        ...     exports=["helper_function", "UtilityClass"]
+        ...     exports=["helper_function", "UtilityClass"],
+        ...     module_path="src.utils",
+        ...     is_test=False
         ... )
     """
     language: str = "python"
@@ -212,6 +222,8 @@ class FileEntity(Entity):
     hash: str = ""
     last_modified: Optional[datetime] = None
     exports: List[str] = field(default_factory=list)
+    module_path: Optional[str] = None
+    is_test: bool = False
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.FILE
@@ -259,6 +271,9 @@ class ClassEntity(Entity):
         is_abstract: True if class inherits from ABC or has abstract methods
         complexity: Cyclomatic complexity of all methods combined
         decorators: List of decorator names applied to the class
+        is_dataclass: True if @dataclass decorator applied
+        is_exception: True if inherits from Exception
+        nesting_level: Depth of nesting (0 for top-level classes)
 
     Example:
         >>> cls = ClassEntity(
@@ -269,12 +284,18 @@ class ClassEntity(Entity):
         ...     line_end=50,
         ...     is_abstract=False,
         ...     complexity=25,
-        ...     decorators=["dataclass"]
+        ...     decorators=["dataclass"],
+        ...     is_dataclass=True,
+        ...     is_exception=False,
+        ...     nesting_level=0
         ... )
     """
     is_abstract: bool = False
     complexity: int = 0
     decorators: List[str] = field(default_factory=list)
+    is_dataclass: bool = False
+    is_exception: bool = False
+    nesting_level: int = 0
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.CLASS
@@ -294,6 +315,12 @@ class FunctionEntity(Entity):
         complexity: Cyclomatic complexity score
         is_async: True if async function or coroutine
         decorators: List of decorator names applied to function
+        is_method: True if this is a class method (not a standalone function)
+        is_static: True if @staticmethod decorator present
+        is_classmethod: True if @classmethod decorator present
+        is_property: True if @property decorator present
+        has_return: True if function has return statement
+        has_yield: True if function has yield statement (generator)
 
     Example:
         >>> func = FunctionEntity(
@@ -307,7 +334,13 @@ class FunctionEntity(Entity):
         ...     return_type="int",
         ...     complexity=5,
         ...     is_async=False,
-        ...     decorators=["lru_cache"]
+        ...     decorators=["lru_cache"],
+        ...     is_method=False,
+        ...     is_static=False,
+        ...     is_classmethod=False,
+        ...     is_property=False,
+        ...     has_return=True,
+        ...     has_yield=False
         ... )
     """
     parameters: List[str] = field(default_factory=list)
@@ -316,6 +349,12 @@ class FunctionEntity(Entity):
     complexity: int = 0
     is_async: bool = False
     decorators: List[str] = field(default_factory=list)
+    is_method: bool = False
+    is_static: bool = False
+    is_classmethod: bool = False
+    is_property: bool = False
+    has_return: bool = False
+    has_yield: bool = False
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.FUNCTION
@@ -372,6 +411,230 @@ class AttributeEntity(Entity):
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.ATTRIBUTE
+
+
+@dataclass
+class ClueEntity(Entity):
+    """AI-generated semantic summary or insight about code.
+
+    Represents a semantic "clue" that helps understand code intent, purpose,
+    or relationships. Generated by NLP models (spaCy) or LLMs (GPT-4).
+
+    Attributes:
+        clue_type: Type of clue (summary, purpose, concept, insight, pattern)
+        summary: Brief summary text of the clue
+        detailed_explanation: Optional longer explanation
+        confidence: Confidence score 0.0-1.0 (higher = more confident)
+        embedding: Optional vector embedding for semantic search
+        generated_by: Method used to generate (spacy, gpt-4, etc.)
+        generated_at: Timestamp when clue was generated
+        keywords: List of extracted keywords
+        target_entity: Qualified name of the entity this clue describes
+
+    Example:
+        >>> clue = ClueEntity(
+        ...     name="authentication_clue",
+        ...     qualified_name="clue::auth_module::purpose",
+        ...     file_path="src/auth.py",
+        ...     line_start=1,
+        ...     line_end=50,
+        ...     clue_type="purpose",
+        ...     summary="Handles user authentication and session management",
+        ...     detailed_explanation="This module implements JWT-based auth...",
+        ...     confidence=0.85,
+        ...     generated_by="spacy",
+        ...     generated_at=datetime.now(),
+        ...     keywords=["authentication", "jwt", "session"],
+        ...     target_entity="src/auth.py::AuthModule"
+        ... )
+    """
+    clue_type: str = "summary"  # summary, purpose, concept, insight, pattern
+    summary: str = ""
+    detailed_explanation: Optional[str] = None
+    confidence: float = 0.0  # 0.0-1.0
+    embedding: Optional[List[float]] = None
+    generated_by: str = "spacy"  # spacy, gpt-4, gpt-4o, etc.
+    generated_at: Optional[datetime] = None
+    keywords: List[str] = field(default_factory=list)
+    target_entity: Optional[str] = None  # Qualified name of entity this describes
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.CLUE
+        if self.generated_at is None:
+            self.generated_at = datetime.utcnow()
+
+
+@dataclass
+class SessionEntity(Entity):
+    """Git commit snapshot representing code at a specific point in time.
+
+    Represents a temporal snapshot of the codebase at a specific commit.
+    Used to track code evolution, detect degradation patterns, and measure
+    technical debt velocity over time.
+
+    Attributes:
+        commit_hash: Git commit SHA hash
+        commit_message: Commit message text
+        author: Author name
+        author_email: Author email address
+        committed_at: Timestamp when commit was created
+        branch: Branch name where commit exists
+        parent_hashes: List of parent commit hashes
+        metrics_snapshot: Metrics calculated for this commit snapshot
+        files_changed: Number of files changed in this commit
+        insertions: Lines added in this commit
+        deletions: Lines deleted in this commit
+
+    Example:
+        >>> session = SessionEntity(
+        ...     name="c5ec541",
+        ...     qualified_name="session::c5ec541abcd",
+        ...     file_path=".",
+        ...     line_start=0,
+        ...     line_end=0,
+        ...     commit_hash="c5ec541abcd1234567890",
+        ...     commit_message="Add new feature",
+        ...     author="John Doe",
+        ...     author_email="john@example.com",
+        ...     committed_at=datetime.now(),
+        ...     branch="main",
+        ...     parent_hashes=["abc123"],
+        ...     files_changed=5,
+        ...     insertions=150,
+        ...     deletions=30
+        ... )
+    """
+    commit_hash: str = ""
+    commit_message: str = ""
+    author: str = ""
+    author_email: str = ""
+    committed_at: Optional[datetime] = None
+    branch: str = "main"
+    parent_hashes: List[str] = field(default_factory=list)
+    metrics_snapshot: Optional[Dict] = None
+    files_changed: int = 0
+    insertions: int = 0
+    deletions: int = 0
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.SESSION
+
+
+@dataclass
+class GitCommit:
+    """Git commit information (data transfer object).
+
+    Not a graph entity, just a DTO for passing commit data from
+    GitRepository to the ingestion pipeline.
+
+    Attributes:
+        hash: Full commit SHA hash
+        short_hash: Short version of commit hash (first 7 chars)
+        message: Commit message
+        author: Author name
+        author_email: Author email address
+        committed_at: Timestamp when committed
+        parent_hashes: List of parent commit hashes
+        branch: Branch name
+        changed_files: List of file paths changed in this commit
+        stats: Dict with insertions/deletions/files_changed counts
+
+    Example:
+        >>> commit = GitCommit(
+        ...     hash="c5ec541abcd1234567890",
+        ...     short_hash="c5ec541",
+        ...     message="Add new feature",
+        ...     author="John Doe",
+        ...     author_email="john@example.com",
+        ...     committed_at=datetime.now(),
+        ...     parent_hashes=["abc123"],
+        ...     branch="main",
+        ...     changed_files=["src/file.py"],
+        ...     stats={"insertions": 150, "deletions": 30, "files_changed": 5}
+        ... )
+    """
+    hash: str
+    short_hash: str
+    message: str
+    author: str
+    author_email: str
+    committed_at: datetime
+    parent_hashes: List[str]
+    branch: str = "main"
+    changed_files: List[str] = field(default_factory=list)
+    stats: Dict = field(default_factory=dict)
+
+
+@dataclass
+class MetricTrend:
+    """Temporal trend analysis for a specific metric.
+
+    Represents how a metric changes over time with statistical analysis
+    of the trend direction and velocity.
+
+    Attributes:
+        metric_name: Name of the metric being tracked
+        values: List of metric values over time
+        timestamps: Corresponding timestamps for each value
+        trend_direction: Direction of trend (increasing, decreasing, stable)
+        change_percentage: Percentage change from first to last value
+        velocity: Average rate of change per day
+        is_degrading: True if trend indicates degradation
+
+    Example:
+        >>> trend = MetricTrend(
+        ...     metric_name="modularity",
+        ...     values=[0.68, 0.65, 0.60, 0.52],
+        ...     timestamps=[datetime(2024, 1, 1), datetime(2024, 2, 1), ...],
+        ...     trend_direction="decreasing",
+        ...     change_percentage=-23.5,
+        ...     velocity=-0.002,
+        ...     is_degrading=True
+        ... )
+    """
+    metric_name: str
+    values: List[float]
+    timestamps: List[datetime]
+    trend_direction: str  # "increasing", "decreasing", "stable"
+    change_percentage: float
+    velocity: float  # Change per day
+    is_degrading: bool = False
+
+
+@dataclass
+class CodeHotspot:
+    """Code hotspot with high churn and increasing complexity.
+
+    Represents a file that is frequently modified and accumulating
+    technical debt, making it a candidate for refactoring.
+
+    Attributes:
+        file_path: Path to the file
+        churn_count: Number of commits modifying this file
+        complexity_velocity: Average complexity increase per commit
+        coupling_velocity: Average coupling increase per commit
+        risk_score: Combined risk score (churn * complexity_velocity)
+        last_modified: Most recent modification timestamp
+        top_authors: Authors who modified this file most frequently
+
+    Example:
+        >>> hotspot = CodeHotspot(
+        ...     file_path="auth/session_manager.py",
+        ...     churn_count=23,
+        ...     complexity_velocity=1.4,
+        ...     coupling_velocity=0.3,
+        ...     risk_score=32.2,
+        ...     last_modified=datetime.now(),
+        ...     top_authors=["Jane Doe", "John Smith"]
+        ... )
+    """
+    file_path: str
+    churn_count: int
+    complexity_velocity: float
+    coupling_velocity: float
+    risk_score: float
+    last_modified: Optional[datetime] = None
+    top_authors: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -481,6 +744,8 @@ class Finding:
         description: Detailed description with context
         affected_nodes: List of entity qualified names affected
         affected_files: List of file paths affected
+        line_start: Optional starting line number where issue occurs
+        line_end: Optional ending line number where issue occurs
         graph_context: Additional graph data about the issue
         suggested_fix: Optional fix suggestion
         estimated_effort: Estimated effort to fix (e.g., "Small (2-4 hours)")
@@ -507,6 +772,8 @@ class Finding:
     description: str
     affected_nodes: List[str]
     affected_files: List[str]
+    line_start: Optional[int] = None
+    line_end: Optional[int] = None
     graph_context: Dict = field(default_factory=dict)
     suggested_fix: Optional[str] = None
     estimated_effort: Optional[str] = None
