@@ -33,15 +33,18 @@ Neo4j is required for the graph database. Start with Docker:
 ```bash
 docker run \
     --name repotoire-neo4j \
-    -p 7474:7474 -p 7687:7687 \
+    -p 7474:7474 -p 7688:7687 \
     -d \
     -e NEO4J_AUTH=neo4j/your-password \
     -e NEO4J_PLUGINS='["graph-data-science", "apoc"]' \
     neo4j:latest
 ```
 
+**Note**: Port 7688 is used on the host to avoid conflicts with standard Neo4j installations. The container still uses 7687 internally.
+
 Configure credentials:
 ```bash
+export REPOTOIRE_NEO4J_URI=bolt://localhost:7688
 export REPOTOIRE_NEO4J_PASSWORD=your-password
 ```
 
@@ -790,11 +793,12 @@ __all__ = [
 
 **Solutions**:
 1. Check Neo4j is running: `docker ps | grep neo4j`
-2. Verify port 7687 is accessible: `telnet localhost 7687`
+2. Verify port 7688 is accessible: `telnet localhost 7688`
 3. Check URI uses Bolt protocol: `bolt://` not `http://`
 4. Test with `repotoire validate`
 5. Check firewall rules
-6. Verify credentials: `echo $REPOTOIRE_NEO4J_PASSWORD`
+6. Verify credentials: `echo $REPOTOIRE_NEO4J_URI $REPOTOIRE_NEO4J_PASSWORD`
+7. Ensure environment variables are set correctly (port 7688, not 7687)
 
 #### 2. Ingestion Performance Issues
 
