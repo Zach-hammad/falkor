@@ -1,7 +1,7 @@
 """Dead code detector - finds unused functions and classes."""
 
 import uuid
-from typing import List, Set
+from typing import List
 from datetime import datetime
 
 from repotoire.detectors.base import CodeSmellDetector

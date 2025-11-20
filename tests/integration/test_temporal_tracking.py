@@ -2,7 +2,7 @@
 
 import pytest
 from datetime import datetime
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, patch
 
 from repotoire.models import GitCommit, SessionEntity, MetricTrend, CodeHotspot
 from repotoire.integrations.git import GitRepository

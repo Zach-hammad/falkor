@@ -1,7 +1,6 @@
 """Integration tests for Neo4j connection pooling and query timeouts."""
 
 import pytest
-import time
 from unittest.mock import Mock, patch, MagicMock
 from neo4j.exceptions import ServiceUnavailable
 

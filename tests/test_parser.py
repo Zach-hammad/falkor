@@ -1,6 +1,5 @@
 """Tests for Python parser."""
 
-import pytest
 from pathlib import Path
 from repotoire.parsers import PythonParser
 from repotoire.models import NodeType

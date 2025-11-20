@@ -6,7 +6,6 @@ import pytest
 from repotoire.detectors.engine import AnalysisEngine
 from repotoire.models import (
     Finding,
-    FindingsSummary,
     MetricsBreakdown,
     Severity,
 )

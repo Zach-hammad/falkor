@@ -1,9 +1,8 @@
 """HTML report generator for Falkor analysis results."""
 
-import json
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 from jinja2 import Template
 
 from repotoire.models import CodebaseHealth, Finding, Severity

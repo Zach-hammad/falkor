@@ -4,9 +4,9 @@ Analyzes how code metrics change over time to detect degradation patterns,
 code hotspots, and technical debt velocity.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Optional
-from statistics import mean, stdev
+from statistics import mean
 
 from repotoire.graph.client import Neo4jClient
 from repotoire.models import MetricTrend, CodeHotspot

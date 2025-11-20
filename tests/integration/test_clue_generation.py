@@ -1,7 +1,6 @@
 """Integration tests for clue generation."""
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
 
 from repotoire.ai import SpacyClueGenerator
 from repotoire.models import FunctionEntity, ClassEntity, FileEntity

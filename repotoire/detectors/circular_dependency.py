@@ -1,7 +1,7 @@
 """Circular dependency detector using graph algorithms."""
 
 import uuid
-from typing import List, Dict, Set
+from typing import List, Set
 from datetime import datetime
 
 from repotoire.detectors.base import CodeSmellDetector

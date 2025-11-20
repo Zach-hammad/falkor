@@ -1,7 +1,5 @@
 """Sample Python file for testing."""
 
-import os
-from pathlib import Path
 
 
 class ParentClass:

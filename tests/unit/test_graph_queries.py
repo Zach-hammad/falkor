@@ -1,7 +1,7 @@
 """Unit tests for graph query utilities."""
 
 import pytest
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock
 from repotoire.graph.queries.patterns import CypherPatterns
 from repotoire.graph.queries.builders import QueryBuilder, DetectorQueryBuilder
 from repotoire.graph.queries.traversal import GraphTraversal

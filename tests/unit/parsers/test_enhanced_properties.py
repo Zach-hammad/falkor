@@ -1,7 +1,6 @@
 """Tests for enhanced node properties (FAL-90)."""
 
 import pytest
-from pathlib import Path
 
 from repotoire.parsers.tree_sitter_python import TreeSitterPythonParser
 from repotoire.models import FileEntity, ClassEntity, FunctionEntity

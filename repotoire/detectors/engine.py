@@ -21,7 +21,6 @@ from repotoire.detectors.feature_envy import FeatureEnvyDetector
 from repotoire.detectors.shotgun_surgery import ShotgunSurgeryDetector
 from repotoire.detectors.middle_man import MiddleManDetector
 from repotoire.detectors.inappropriate_intimacy import InappropriateIntimacyDetector
-from repotoire.detectors.truly_unused_imports import TrulyUnusedImportsDetector
 
 # Hybrid detectors (ruff + graph)
 from repotoire.detectors.ruff_import_detector import RuffImportDetector

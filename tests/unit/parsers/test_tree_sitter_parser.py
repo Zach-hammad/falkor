@@ -1,10 +1,8 @@
 """Tests for tree-sitter universal AST adapter."""
 
 import pytest
-from pathlib import Path
-import tempfile
 
-from repotoire.parsers.tree_sitter_adapter import UniversalASTNode, TreeSitterAdapter
+from repotoire.parsers.tree_sitter_adapter import UniversalASTNode
 from repotoire.parsers.tree_sitter_python import TreeSitterPythonParser
 
 

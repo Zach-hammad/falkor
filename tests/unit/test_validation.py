@@ -1,8 +1,6 @@
 """Unit tests for validation utilities."""
 
 import os
-import tempfile
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -552,7 +550,6 @@ class TestNeo4jConnectionValidation:
     def test_neo4j_not_installed(self):
         """Test validation fails when neo4j package not installed."""
         # Mock the import to raise ImportError
-        import sys
         with patch.dict('sys.modules', {'neo4j': None}):
             with patch('builtins.__import__', side_effect=ImportError("No module named 'neo4j'")):
                 with pytest.raises(ValidationError) as exc_info:

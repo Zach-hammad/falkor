@@ -1,9 +1,6 @@
 """Integration tests for incremental ingestion functionality."""
 
 import hashlib
-import tempfile
-from pathlib import Path
-from datetime import datetime
 
 import pytest
 

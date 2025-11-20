@@ -2,13 +2,13 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import Mock, MagicMock, patch, call
+from unittest.mock import Mock, MagicMock, patch
 
 import pytest
 
 from repotoire.pipeline.ingestion import IngestionPipeline
 from repotoire.parsers import CodeParser
-from repotoire.models import FileEntity, ClassEntity, Relationship, RelationshipType, NodeType
+from repotoire.models import FileEntity, Relationship, RelationshipType, NodeType
 
 
 @pytest.fixture

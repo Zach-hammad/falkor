@@ -1,7 +1,6 @@
 """Tests for relationship extraction from tree-sitter parsers."""
 
 import pytest
-from pathlib import Path
 
 from repotoire.parsers.tree_sitter_python import TreeSitterPythonParser
 from repotoire.models import RelationshipType

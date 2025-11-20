@@ -1,7 +1,7 @@
 """Integration tests for schema migration system."""
 
 import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import MagicMock
 
 from repotoire.migrations import Migration, MigrationManager, MigrationError
 from repotoire.graph import Neo4jClient

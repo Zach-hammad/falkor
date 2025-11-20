@@ -185,9 +185,6 @@ class TestNodeTypeValidation:
 
     def test_invalid_node_type_rejected(self):
         """Test that invalid node types are rejected."""
-        from repotoire.models import Entity, NodeType
-        from repotoire.graph.client import Neo4jClient
-        from unittest.mock import Mock
 
         # Create a mock entity with invalid node_type
         # This is harder to test since node_type comes from enum,

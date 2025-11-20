@@ -6,7 +6,6 @@ enabling code reuse across different programming languages.
 
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Iterator
-from pathlib import Path
 
 
 @dataclass

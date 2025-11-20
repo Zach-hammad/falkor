@@ -1,7 +1,6 @@
 """Command-line interface for Repotoire."""
 
 import click
-import os
 from dataclasses import asdict
 from pathlib import Path
 from rich.console import Console
@@ -9,8 +8,6 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 from rich.tree import Tree
-from rich.syntax import Syntax
-from rich.layout import Layout
 from rich.text import Text
 from rich import box
 
@@ -19,7 +16,7 @@ from repotoire.graph import Neo4jClient
 from repotoire.detectors import AnalysisEngine
 from repotoire.migrations import MigrationManager, MigrationError
 from repotoire.logging_config import configure_logging, get_logger, LogContext
-from repotoire.config import load_config, FalkorConfig, ConfigError, generate_config_template, load_config_from_env
+from repotoire.config import load_config, FalkorConfig, ConfigError, generate_config_template
 from repotoire.models import SecretsPolicy
 from repotoire.validation import (
     ValidationError,

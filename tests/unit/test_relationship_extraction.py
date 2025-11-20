@@ -12,7 +12,6 @@ Addresses: FAL-107
 
 import pytest
 from repotoire.models import (
-    FileEntity,
     ClassEntity,
     FunctionEntity,
     AttributeEntity,

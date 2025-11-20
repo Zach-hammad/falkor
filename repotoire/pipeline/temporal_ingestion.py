@@ -4,11 +4,9 @@ This module extends the base ingestion pipeline to support temporal code analysi
 by tracking code snapshots across Git commits.
 """
 
-from datetime import datetime, timedelta
-from typing import List, Optional, Set
+from datetime import datetime
+from typing import List, Optional
 from pathlib import Path
-import tempfile
-import shutil
 
 from repotoire.pipeline.ingestion import IngestionPipeline
 from repotoire.integrations.git import GitRepository

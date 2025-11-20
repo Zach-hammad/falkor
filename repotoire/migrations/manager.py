@@ -4,8 +4,7 @@ import importlib
 import importlib.util
 import inspect
 from pathlib import Path
-from typing import List, Optional, Dict, Type
-from datetime import datetime
+from typing import List, Optional, Dict
 
 from repotoire.graph import Neo4jClient
 from repotoire.migrations.migration import Migration, MigrationError

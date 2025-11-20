@@ -1,13 +1,13 @@
 """Unit tests for Neo4jClient."""
 
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 import time
 
 import pytest
 from neo4j.exceptions import ServiceUnavailable, SessionExpired
 
 from repotoire.graph.client import Neo4jClient
-from repotoire.models import FileEntity, ClassEntity, FunctionEntity, Relationship, RelationshipType, NodeType
+from repotoire.models import FileEntity, ClassEntity, FunctionEntity, Relationship, RelationshipType
 
 
 @pytest.fixture

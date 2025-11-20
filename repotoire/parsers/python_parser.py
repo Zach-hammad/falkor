@@ -2,7 +2,7 @@
 
 import ast
 from pathlib import Path
-from typing import Any, List, Dict, Optional
+from typing import List, Dict, Optional
 import hashlib
 
 from repotoire.parsers.base import CodeParser
@@ -12,7 +12,6 @@ from repotoire.models import (
     ModuleEntity,
     ClassEntity,
     FunctionEntity,
-    VariableEntity,
     AttributeEntity,
     Relationship,
     NodeType,
