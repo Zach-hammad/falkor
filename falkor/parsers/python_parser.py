@@ -110,11 +110,23 @@ class PythonParser(CodeParser):
                         )
                         entities.append(method_entity)
 
+                        # Extract nested functions within methods
+                        nested_funcs = self._extract_nested_functions(
+                            item, file_path, parent_qualified=method_entity.qualified_name
+                        )
+                        entities.extend(nested_funcs)
+
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 # Only top-level functions (not methods)
                 if self._is_top_level(node, tree):
                     func_entity = self._extract_function(node, file_path)
                     entities.append(func_entity)
+
+                    # Extract nested functions within top-level functions
+                    nested_funcs = self._extract_nested_functions(
+                        node, file_path, parent_qualified=func_entity.qualified_name
+                    )
+                    entities.extend(nested_funcs)
 
         # Extract module entities from imports
         module_entities = self._extract_modules(tree, file_path)
@@ -455,6 +467,77 @@ class PythonParser(CodeParser):
             is_method=class_name is not None,  # Method if defined inside a class
         )
 
+    def _extract_nested_functions(
+        self, parent_node: ast.FunctionDef | ast.AsyncFunctionDef, file_path: str, parent_qualified: str
+    ) -> List[FunctionEntity]:
+        """Extract nested functions from within a function body.
+
+        Args:
+            parent_node: Parent function AST node
+            file_path: Path to source file
+            parent_qualified: Parent function's qualified name (e.g., "file.py::func:123")
+
+        Returns:
+            List of nested FunctionEntity objects
+        """
+        nested_entities = []
+
+        # Walk through the function body to find nested functions
+        for node in parent_node.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # This is a nested function - extract it
+                # Build qualified name with parent prefix: "parent_qname.nested_name:line"
+                # Example: "file.py::log_operation:203" + ".wrapper:248" = "file.py::log_operation:203.wrapper:248"
+                # This format allows CONTAINS logic to extract parent automatically
+                qualified_name = f"{parent_qualified}.{node.name}:{node.lineno}"
+
+                docstring = ast.get_docstring(node)
+
+                # Scan docstring for secrets
+                if docstring:
+                    docstring = self._scan_and_redact_text(docstring, file_path, node.lineno)
+
+                # Extract parameters
+                parameters = [arg.arg for arg in node.args.args]
+
+                # Extract parameter type annotations
+                parameter_types = {}
+                for arg in node.args.args:
+                    if arg.annotation:
+                        parameter_types[arg.arg] = ast.unparse(arg.annotation)
+
+                # Extract return type if annotated
+                return_type = None
+                if node.returns:
+                    return_type = ast.unparse(node.returns)
+
+                # Extract decorators
+                decorators = [self._get_decorator_name(dec) for dec in node.decorator_list]
+
+                nested_func = FunctionEntity(
+                    name=node.name,
+                    qualified_name=qualified_name,
+                    file_path=file_path,
+                    line_start=node.lineno,
+                    line_end=node.end_lineno or node.lineno,
+                    docstring=docstring,
+                    parameters=parameters,
+                    parameter_types=parameter_types,
+                    return_type=return_type,
+                    complexity=self._calculate_complexity(node),
+                    is_async=isinstance(node, ast.AsyncFunctionDef),
+                    decorators=decorators,
+                    is_method=False,  # Nested functions are not methods
+                )
+
+                nested_entities.append(nested_func)
+
+                # Recursively extract nested functions within this nested function
+                deeper_nested = self._extract_nested_functions(node, file_path, qualified_name)
+                nested_entities.extend(deeper_nested)
+
+        return nested_entities
+
     def _calculate_complexity(self, node: ast.AST) -> int:
         """Calculate cyclomatic complexity of a code block.
 
@@ -530,7 +613,7 @@ class PythonParser(CodeParser):
         """
 
         class CallVisitor(ast.NodeVisitor):
-            """AST visitor to track function calls within their scope."""
+            """AST visitor to track function calls and references within their scope."""
 
             def __init__(self, file_path: str):
                 self.file_path = file_path
@@ -538,6 +621,7 @@ class PythonParser(CodeParser):
                 self.current_class_line: Optional[int] = None
                 self.function_stack: List[tuple[str, int]] = []  # Stack for nested functions (name, line)
                 self.calls: List[tuple[str, str, int, bool]] = []  # (caller, callee, line, is_self_call)
+                self.uses: List[tuple[str, str, int]] = []  # (user, used_function, line) for function references
 
             def visit_ClassDef(self, node: ast.ClassDef) -> None:
                 """Visit class definition."""
@@ -565,14 +649,19 @@ class PythonParser(CodeParser):
                 """Visit function call."""
                 if self.function_stack:
                     # Build function qualified name from stack with line numbers
-                    # For nested functions, use just the innermost function
-                    func_name, func_line = self.function_stack[-1]
-
-                    # Determine caller qualified name with line number
+                    # For nested functions, build full chain: parent.child:line
                     if self.current_class and self.current_class_line:
-                        caller = f"{self.file_path}::{self.current_class}:{self.current_class_line}.{func_name}:{func_line}"
+                        # Method (possibly nested): file.py::ClassName:line.method:line[.nested:line...]
+                        caller = f"{self.file_path}::{self.current_class}:{self.current_class_line}"
+                        for func_name, func_line in self.function_stack:
+                            caller += f".{func_name}:{func_line}"
                     else:
-                        caller = f"{self.file_path}::{func_name}:{func_line}"
+                        # Top-level function (possibly nested): file.py::func:line[.nested:line...]
+                        first_func_name, first_func_line = self.function_stack[0]
+                        caller = f"{self.file_path}::{first_func_name}:{first_func_line}"
+                        # Add nested functions if any
+                        for func_name, func_line in self.function_stack[1:]:
+                            caller += f".{func_name}:{func_line}"
 
                     # Determine callee name (best effort)
                     result = self._get_call_name(node)
@@ -580,6 +669,52 @@ class PythonParser(CodeParser):
                         callee, is_self_call = result
                         self.calls.append((caller, callee, node.lineno, is_self_call))
 
+                    # Track function references passed as arguments
+                    for arg in node.args:
+                        if isinstance(arg, ast.Name):
+                            # Function passed as argument: some_func(my_function)
+                            self.uses.append((caller, arg.id, node.lineno))
+
+                self.generic_visit(node)
+
+            def visit_Name(self, node: ast.Name) -> None:
+                """Visit name reference - track function references (not calls)."""
+                # Only track if we're inside a function and the name is being loaded/used
+                if self.function_stack and isinstance(node.ctx, (ast.Load, ast.Store)):
+                    # Check if this Name node is part of a Call node
+                    # We do this by checking parent context (simplified heuristic)
+                    # Skip if it's the function being called in a Call expression
+                    # This is detected in visit_Call, so we don't duplicate
+                    pass  # Name tracking happens in visit_Return and visit_arg
+
+                self.generic_visit(node)
+
+            def visit_Return(self, node: ast.Return) -> None:
+                """Visit return statement - track functions being returned."""
+                if self.function_stack and node.value:
+                    # Build current function qualified name
+                    if self.current_class and self.current_class_line:
+                        user = f"{self.file_path}::{self.current_class}:{self.current_class_line}"
+                        for func_name, func_line in self.function_stack:
+                            user += f".{func_name}:{func_line}"
+                    else:
+                        first_func_name, first_func_line = self.function_stack[0]
+                        user = f"{self.file_path}::{first_func_name}:{first_func_line}"
+                        for func_name, func_line in self.function_stack[1:]:
+                            user += f".{func_name}:{func_line}"
+
+                    # Check if returning a function reference
+                    if isinstance(node.value, ast.Name):
+                        # return some_function
+                        self.uses.append((user, node.value.id, node.lineno))
+
+                self.generic_visit(node)
+
+            def visit_arg(self, node: ast.arg) -> None:
+                """Visit function argument in a Call node."""
+                # Track function references passed as arguments
+                # This is complex to track perfectly, so we use a simplified approach
+                # The visit method for arguments inside Call will help track these
                 self.generic_visit(node)
 
             def _get_call_name(self, node: ast.Call) -> Optional[tuple[str, bool]]:
@@ -682,6 +817,36 @@ class PythonParser(CodeParser):
                     properties={"line": line, "call_name": callee, "is_self_call": is_self_call},
                 )
             )
+
+        # Create USES relationships for function references (not calls)
+        for user, used_func_name, line in visitor.uses:
+            # Try to resolve the function reference
+            used_qualified = None
+
+            # Try to find the function in entity_map
+            for qname, entity in entity_map.items():
+                if entity.node_type == NodeType.FUNCTION and entity.name == used_func_name:
+                    # Prefer functions in the same file
+                    if qname.startswith(file_path):
+                        used_qualified = qname
+                        break
+
+            # If not found in same file, try any file
+            if not used_qualified:
+                for qname, entity in entity_map.items():
+                    if entity.node_type == NodeType.FUNCTION and entity.name == used_func_name:
+                        used_qualified = qname
+                        break
+
+            if used_qualified:
+                relationships.append(
+                    Relationship(
+                        source_id=user,
+                        target_id=used_qualified,
+                        rel_type=RelationshipType.USES,
+                        properties={"line": line, "reference_type": "function_reference"},
+                    )
+                )
 
     def _extract_inheritance(
         self,

@@ -103,6 +103,7 @@ class DeadCodeDetector(CodeSmellDetector):
         query = """
         MATCH (f:Function)
         WHERE NOT (f)<-[:CALLS]-()
+          AND NOT (f)<-[:USES]-()
           AND NOT (f.name STARTS WITH 'test_')
           AND NOT f.name IN ['main', '__main__', '__init__', 'setUp', 'tearDown']
           // Filter out methods that override base class methods (polymorphism)
@@ -123,6 +124,10 @@ class DeadCodeDetector(CodeSmellDetector):
         // Filter out functions with decorators or in __all__
         WHERE size(decorators) = 0
           AND NOT (file.exports IS NOT NULL AND f.name IN file.exports)
+          // Filter out test fixtures and examples
+          AND NOT (file.filePath STARTS WITH 'tests/fixtures/' OR file.filePath CONTAINS '/tests/fixtures/')
+          AND NOT (file.filePath STARTS WITH 'examples/' OR file.filePath CONTAINS '/examples/')
+          AND NOT (file.filePath STARTS WITH 'test_fixtures/' OR file.filePath CONTAINS '/test_fixtures/')
         RETURN f.qualifiedName AS qualified_name,
                f.name AS name,
                f.filePath AS file_path,
@@ -223,9 +228,14 @@ class DeadCodeDetector(CodeSmellDetector):
 
         query = """
         MATCH (file:File)-[:CONTAINS]->(c:Class)
-        WHERE NOT (c)<-[:CALLS]-()  // Not instantiated
+        WHERE NOT (c)<-[:CALLS]-()  // Not instantiated directly
           AND NOT (c)<-[:INHERITS]-()  // Not inherited from
           AND NOT (c)<-[:USES]-()  // Not used in type hints
+          // Check for CALLS via call_name property (cross-file calls)
+          AND NOT EXISTS {
+              MATCH ()-[call:CALLS]->()
+              WHERE call.call_name = c.name
+          }
           // Filter out classes that are imported (check by name in import properties)
           AND NOT EXISTS {
               MATCH ()-[imp:IMPORTS]->()
@@ -237,6 +247,10 @@ class DeadCodeDetector(CodeSmellDetector):
         // Filter out classes with decorators or in __all__
         WHERE size(decorators) = 0
           AND NOT (file.exports IS NOT NULL AND c.name IN file.exports)
+          // Filter out test fixtures and examples
+          AND NOT (file.filePath STARTS WITH 'tests/fixtures/' OR file.filePath CONTAINS '/tests/fixtures/')
+          AND NOT (file.filePath STARTS WITH 'examples/' OR file.filePath CONTAINS '/examples/')
+          AND NOT (file.filePath STARTS WITH 'test_fixtures/' OR file.filePath CONTAINS '/test_fixtures/')
         RETURN c.qualifiedName AS qualified_name,
                c.name AS name,
                c.filePath AS file_path,
