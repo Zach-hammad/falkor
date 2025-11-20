@@ -600,6 +600,162 @@ class FeatureEnvyDetector(CodeSmellDetector):
         return findings
 ```
 
+### Adding a Hybrid Detector (External Tool + Graph)
+
+**Hybrid detectors** combine external linting tools with graph enrichment for optimal accuracy and context.
+
+**Architecture**:
+```
+┌──────────────┐
+│External Tool │ ──> Accurate Detection (e.g., ruff, pylint, mypy)
+└──────────────┘
+       │
+       ▼
+┌──────────────┐
+│  Parse JSON  │ ──> Extract findings with metadata
+└──────────────┘
+       │
+       ▼
+┌──────────────┐
+│ Graph Query  │ ──> Enrich with file context (LOC, complexity)
+└──────────────┘
+       │
+       ▼
+┌──────────────┐
+│   Finding    │ ──> Unified reporting with severity & fixes
+└──────────────┘
+```
+
+**Example: RuffImportDetector**
+
+**Step 1**: Create detector file in `repotoire/detectors/`
+
+```python
+"""Ruff-based unused import detector with graph enrichment."""
+import subprocess
+import json
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+
+from repotoire.detectors.base import CodeSmellDetector
+from repotoire.models import Finding, Severity
+from repotoire.graph.client import Neo4jClient
+
+class RuffImportDetector(CodeSmellDetector):
+    """Detects unused imports using ruff with graph-based enrichment."""
+
+    def __init__(self, neo4j_client: Neo4jClient, detector_config: Optional[Dict[str, Any]] = None):
+        super().__init__(neo4j_client)
+        config = detector_config or {}
+        self.repository_path = config.get("repository_path", ".")
+
+    def detect(self) -> List[Finding]:
+        """Run ruff F401 check and enrich with graph context."""
+        # 1. Run external tool
+        ruff_findings = self._run_ruff()
+
+        if not ruff_findings:
+            return []
+
+        # 2. Group by file
+        findings_by_file: Dict[str, List[Dict]] = {}
+        for ruff_finding in ruff_findings:
+            file_path = ruff_finding["filename"]
+            if file_path not in findings_by_file:
+                findings_by_file[file_path] = []
+            findings_by_file[file_path].append(ruff_finding)
+
+        # 3. Enrich with graph context
+        findings = []
+        for file_path, file_findings in findings_by_file.items():
+            graph_context = self._get_file_context(file_path)
+
+            # Build finding with combined context
+            finding = Finding(
+                id=f"ruff_imports_{file_path.replace('/', '_')}",
+                detector=self.__class__.__name__,
+                severity=Severity.MEDIUM if len(file_findings) >= 5 else Severity.LOW,
+                title=f"Unused imports in {Path(file_path).name}",
+                description=f"Found {len(file_findings)} unused imports",
+                affected_files=[file_path],
+                suggested_fix=f"Run: ruff check --select F401 --fix {file_path}",
+                graph_context={
+                    "tool": "ruff",
+                    "rule": "F401",
+                    "import_count": len(file_findings),
+                    "file_loc": graph_context.get("loc") if graph_context else None,
+                }
+            )
+            findings.append(finding)
+
+        return findings
+
+    def _run_ruff(self) -> List[Dict[str, Any]]:
+        """Execute ruff and parse JSON output."""
+        result = subprocess.run(
+            ["ruff", "check", "--select", "F401", "--output-format", "json",
+             str(self.repository_path)],
+            capture_output=True, text=True, check=False
+        )
+
+        if result.stdout:
+            findings = json.loads(result.stdout)
+            return [f for f in findings if f["code"] == "F401"]
+        return []
+
+    def _get_file_context(self, file_path: str) -> Optional[Dict[str, Any]]:
+        """Query graph for file metadata."""
+        query = """
+        MATCH (f:File {filePath: $file_path})
+        RETURN f.loc as loc, f.complexity as complexity
+        LIMIT 1
+        """
+        results = self.db.execute_query(query, {"file_path": file_path})
+        return results[0] if results else None
+```
+
+**Step 2**: Update `AnalysisEngine` to support repository_path
+
+```python
+class AnalysisEngine:
+    def __init__(self, neo4j_client: Neo4jClient, detector_config: Dict = None,
+                 repository_path: str = "."):
+        """Initialize with repository path for hybrid detectors."""
+        self.repository_path = repository_path
+
+        self.detectors = [
+            # ... other detectors ...
+            # Hybrid detectors
+            RuffImportDetector(neo4j_client, detector_config={
+                "repository_path": repository_path
+            }),
+        ]
+```
+
+**Step 3**: Register in `__init__.py`
+
+```python
+from repotoire.detectors.ruff_import_detector import RuffImportDetector
+
+__all__ = [
+    # ... other exports ...
+    "RuffImportDetector",
+]
+```
+
+**Benefits of Hybrid Approach**:
+- **Accuracy**: External tools like ruff have 0% false positive rate using AST
+- **Context**: Graph enrichment adds file LOC, complexity, relationships
+- **Actionability**: Auto-fix suggestions from external tool
+- **Consistency**: Same Finding model as pure graph detectors
+- **Performance**: External tools are often faster than pure graph queries
+
+**Other Hybrid Detector Candidates**:
+- **pylint + graph**: Code style issues with class complexity
+- **mypy + graph**: Type errors with function call graphs
+- **bandit + graph**: Security issues with import dependency trees
+- **radon + graph**: Cyclomatic complexity with architectural metrics
+
 ### Adding a New Report Format
 
 **Steps**:
