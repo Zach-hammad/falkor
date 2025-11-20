@@ -197,12 +197,19 @@ class TestCypherPatterns:
         # Check query was called
         assert mock_client.execute_query.called
         query = mock_client.execute_query.call_args[0][0]
+        params = mock_client.execute_query.call_args[1]["parameters"]
 
         assert "MATCH (n1:File)" in query
         assert "MATCH (n2:File)" in query
-        assert "shortestPath((n1)-[:IMPORTS*2..10]->(n2))" in query
-        assert "shortestPath((n2)-[:IMPORTS*2..10]->(n1))" in query
-        assert "LIMIT 50" in query
+        # Check for parameterized query (not hardcoded values)
+        assert "shortestPath((n1)-[:IMPORTS*$min_length..$max_length]->(n2))" in query
+        assert "shortestPath((n2)-[:IMPORTS*$min_length..$max_length]->(n1))" in query
+        assert "LIMIT $limit" in query
+
+        # Verify parameters
+        assert params["min_length"] == 2
+        assert params["max_length"] == 10
+        assert params["limit"] == 50
 
         # Check result
         assert len(result) == 1
@@ -258,8 +265,9 @@ class TestCypherPatterns:
         query = mock_client.execute_query.call_args[0][0]
         params = mock_client.execute_query.call_args[1]["parameters"]
 
-        assert "shortestPath((source)-[:CALLS*1..5]-(target))" in query
-        assert params == {"source_id": "node1", "target_id": "node3"}
+        # Check for parameterized query (not hardcoded max_depth)
+        assert "shortestPath((source)-[:CALLS*1..$max_depth]-(target))" in query
+        assert params == {"source_id": "node1", "target_id": "node3", "max_depth": 5}
 
         # Check result
         assert result is not None
@@ -298,9 +306,13 @@ class TestCypherPatterns:
 
         # Check query
         query = mock_client.execute_query.call_args[0][0]
+        params = mock_client.execute_query.call_args[1]["parameters"]
+
         assert "count(DISTINCT out) AS out_degree" in query
         assert "count(DISTINCT in) AS in_degree" in query
-        assert "WHERE total_degree >= 10" in query
+        # Check for parameterized query (not hardcoded threshold)
+        assert "WHERE total_degree >= $threshold" in query
+        assert params["threshold"] == 10
 
         # Check result
         assert len(result) == 1

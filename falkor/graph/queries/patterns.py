@@ -6,6 +6,7 @@ and calculating graph metrics used by detectors.
 
 from typing import List, Dict, Any, Optional
 from falkor.graph.client import Neo4jClient
+from falkor.validation import validate_identifier
 
 
 class CypherPatterns:
@@ -47,19 +48,28 @@ class CypherPatterns:
             >>> for cycle in cycles:
             ...     print(f"Cycle of length {cycle['length']}: {cycle['nodes']}")
         """
+        # Validate inputs to prevent Cypher injection
+        validated_label = validate_identifier(node_label, "node label")
+        validated_rel_type = validate_identifier(relationship_type, "relationship type")
+
+        # Use parameterized query for numeric values
         query = f"""
-        MATCH (n1:{node_label})
-        MATCH (n2:{node_label})
+        MATCH (n1:{validated_label})
+        MATCH (n2:{validated_label})
         WHERE elementId(n1) < elementId(n2) AND n1 <> n2
-        MATCH path = shortestPath((n1)-[:{relationship_type}*{min_length}..{max_length}]->(n2))
-        MATCH cyclePath = shortestPath((n2)-[:{relationship_type}*{min_length}..{max_length}]->(n1))
-        WITH DISTINCT [node IN nodes(path) + nodes(cyclePath) WHERE node:{node_label} | node.filePath] AS cycle
+        MATCH path = shortestPath((n1)-[:{validated_rel_type}*$min_length..$max_length]->(n2))
+        MATCH cyclePath = shortestPath((n2)-[:{validated_rel_type}*$min_length..$max_length]->(n1))
+        WITH DISTINCT [node IN nodes(path) + nodes(cyclePath) WHERE node:{validated_label} | node.filePath] AS cycle
         WHERE size(cycle) > 1
         RETURN cycle AS nodes, size(cycle) AS length
         ORDER BY length DESC
-        LIMIT {limit}
+        LIMIT $limit
         """
-        results = self.client.execute_query(query)
+        results = self.client.execute_query(query, parameters={
+            "min_length": min_length,
+            "max_length": max_length,
+            "limit": limit
+        })
         return [{"nodes": r["nodes"], "length": r["length"]} for r in results]
 
     def calculate_degree_centrality(
@@ -86,15 +96,28 @@ class CypherPatterns:
             >>> for node in centrality[:10]:
             ...     print(f"{node['name']}: {node['degree']} outgoing connections")
         """
+        # Validate inputs to prevent Cypher injection
+        validated_label = validate_identifier(node_label, "node label")
+        validated_rel_type = validate_identifier(relationship_type, "relationship type")
+
+        # Validate direction parameter
+        valid_directions = {"OUTGOING", "INCOMING", "BOTH"}
+        if direction not in valid_directions:
+            from falkor.validation import ValidationError
+            raise ValidationError(
+                f"Invalid direction: {direction}",
+                f"Direction must be one of: {', '.join(valid_directions)}"
+            )
+
         if direction == "OUTGOING":
-            rel_pattern = f"-[:{relationship_type}]->"
+            rel_pattern = f"-[:{validated_rel_type}]->"
         elif direction == "INCOMING":
-            rel_pattern = f"<-[:{relationship_type}]-"
+            rel_pattern = f"<-[:{validated_rel_type}]-"
         else:  # BOTH
-            rel_pattern = f"-[:{relationship_type}]-"
+            rel_pattern = f"-[:{validated_rel_type}]-"
 
         query = f"""
-        MATCH (n:{node_label})
+        MATCH (n:{validated_label})
         OPTIONAL MATCH (n){rel_pattern}(connected)
         WITH n, count(connected) AS degree
         RETURN elementId(n) AS node,
@@ -133,11 +156,15 @@ class CypherPatterns:
             >>> components = patterns.find_connected_components("File", "IMPORTS")
             >>> print(f"Found {len(components)} connected components")
         """
+        # Validate inputs to prevent Cypher injection
+        validated_label = validate_identifier(node_label, "node label")
+        validated_rel_type = validate_identifier(relationship_type, "relationship type")
+
         # Simple connected components using APOC or manual approach
         # For MVP, we'll use a simple approach: find all nodes reachable from each node
         query = f"""
-        MATCH (n:{node_label})
-        OPTIONAL MATCH path = (n)-[:{relationship_type}*]-(connected:{node_label})
+        MATCH (n:{validated_label})
+        OPTIONAL MATCH path = (n)-[:{validated_rel_type}*]-(connected:{validated_label})
         WITH n, collect(DISTINCT connected) + [n] AS component
         RETURN elementId(n) AS component_id,
                [node IN component | node.filePath] AS nodes,
@@ -186,19 +213,29 @@ class CypherPatterns:
             >>> if path:
             ...     print(f"Path length: {path['length']}")
         """
-        rel_filter = f":{relationship_type}" if relationship_type else ""
+        # Validate relationship_type if provided
+        if relationship_type:
+            validated_rel_type = validate_identifier(relationship_type, "relationship type")
+            rel_filter = f":{validated_rel_type}"
+        else:
+            rel_filter = ""
 
+        # Use parameterized query for max_depth
         query = f"""
         MATCH (source), (target)
         WHERE elementId(source) = $source_id AND elementId(target) = $target_id
-        MATCH path = shortestPath((source)-[{rel_filter}*1..{max_depth}]-(target))
+        MATCH path = shortestPath((source)-[{rel_filter}*1..$max_depth]-(target))
         RETURN path,
                length(path) AS length,
                [node IN nodes(path) | {{id: elementId(node), name: node.name}}] AS nodes
         """
         results = self.client.execute_query(
             query,
-            parameters={"source_id": source_id, "target_id": target_id}
+            parameters={
+                "source_id": source_id,
+                "target_id": target_id,
+                "max_depth": max_depth
+            }
         )
 
         if results:
@@ -235,20 +272,31 @@ class CypherPatterns:
             >>> paths = patterns.find_all_paths(node1_id, node2_id, "CALLS", max_depth=3)
             >>> print(f"Found {len(paths)} paths")
         """
-        rel_filter = f":{relationship_type}" if relationship_type else ""
+        # Validate relationship_type if provided
+        if relationship_type:
+            validated_rel_type = validate_identifier(relationship_type, "relationship type")
+            rel_filter = f":{validated_rel_type}"
+        else:
+            rel_filter = ""
 
+        # Use parameterized query for numeric values
         query = f"""
         MATCH (source), (target)
         WHERE elementId(source) = $source_id AND elementId(target) = $target_id
-        MATCH path = (source)-[{rel_filter}*1..{max_depth}]-(target)
+        MATCH path = (source)-[{rel_filter}*1..$max_depth]-(target)
         RETURN length(path) AS length,
                [node IN nodes(path) | {{id: elementId(node), name: node.name}}] AS nodes
         ORDER BY length
-        LIMIT {limit}
+        LIMIT $limit
         """
         results = self.client.execute_query(
             query,
-            parameters={"source_id": source_id, "target_id": target_id}
+            parameters={
+                "source_id": source_id,
+                "target_id": target_id,
+                "max_depth": max_depth,
+                "limit": limit
+            }
         )
 
         return [{"length": r["length"], "nodes": r["nodes"]} for r in results]
@@ -277,16 +325,20 @@ class CypherPatterns:
             >>> for node in bottlenecks:
             ...     print(f"Bottleneck: {node['name']} (degree: {node['degree']})")
         """
+        # Validate inputs to prevent Cypher injection
+        validated_label = validate_identifier(node_label, "node label")
+        validated_rel_type = validate_identifier(relationship_type, "relationship type")
+
         # Simple approximation: nodes with high combined in/out degree
         query = f"""
-        MATCH (n:{node_label})
-        OPTIONAL MATCH (n)-[:{relationship_type}]->(out)
-        OPTIONAL MATCH (n)<-[:{relationship_type}]-(in)
+        MATCH (n:{validated_label})
+        OPTIONAL MATCH (n)-[:{validated_rel_type}]->(out)
+        OPTIONAL MATCH (n)<-[:{validated_rel_type}]-(in)
         WITH n,
              count(DISTINCT out) AS out_degree,
              count(DISTINCT in) AS in_degree,
              count(DISTINCT out) + count(DISTINCT in) AS total_degree
-        WHERE total_degree >= {threshold}
+        WHERE total_degree >= $threshold
         RETURN elementId(n) AS node,
                n.name AS name,
                n.filePath AS file_path,
@@ -295,7 +347,7 @@ class CypherPatterns:
                total_degree AS degree
         ORDER BY total_degree DESC
         """
-        results = self.client.execute_query(query)
+        results = self.client.execute_query(query, parameters={"threshold": threshold})
         return [
             {
                 "node": r["node"],
@@ -329,17 +381,21 @@ class CypherPatterns:
             >>> coef = patterns.calculate_clustering_coefficient("File", "IMPORTS")
             >>> print(f"Clustering coefficient: {coef:.3f}")
         """
+        # Validate inputs to prevent Cypher injection
+        validated_label = validate_identifier(node_label, "node label")
+        validated_rel_type = validate_identifier(relationship_type, "relationship type")
+
         # For each node, count triangles and possible triangles
         query = f"""
-        MATCH (n:{node_label})
-        OPTIONAL MATCH (n)-[:{relationship_type}]-(neighbor:{node_label})
+        MATCH (n:{validated_label})
+        OPTIONAL MATCH (n)-[:{validated_rel_type}]-(neighbor:{validated_label})
         WITH n, collect(DISTINCT neighbor) AS neighbors, count(DISTINCT neighbor) AS degree
         WHERE degree >= 2
         UNWIND neighbors AS neighbor1
         UNWIND neighbors AS neighbor2
         WITH n, neighbor1, neighbor2, degree
         WHERE neighbor1 <> neighbor2
-        OPTIONAL MATCH (neighbor1)-[:{relationship_type}]-(neighbor2)
+        OPTIONAL MATCH (neighbor1)-[:{validated_rel_type}]-(neighbor2)
         WITH n, degree, count(DISTINCT neighbor2) AS triangles
         WITH n, degree, triangles, (degree * (degree - 1)) / 2.0 AS possible
         WHERE possible > 0

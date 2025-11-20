@@ -7,6 +7,7 @@ for cases where custom filtering or complex traversal logic is needed.
 from typing import List, Dict, Any, Set, Callable, Optional
 from collections import deque
 from falkor.graph.client import Neo4jClient
+from falkor.validation import validate_identifier, ValidationError
 
 
 class GraphTraversal:
@@ -294,12 +295,23 @@ class GraphTraversal:
         Returns:
             List of neighbor elementIds
         """
+        # Validate inputs to prevent Cypher injection
+        validated_rel_type = validate_identifier(relationship_type, "relationship type")
+
+        # Validate direction parameter
+        valid_directions = {"OUTGOING", "INCOMING", "BOTH"}
+        if direction not in valid_directions:
+            raise ValidationError(
+                f"Invalid direction: {direction}",
+                f"Direction must be one of: {', '.join(valid_directions)}"
+            )
+
         if direction == "OUTGOING":
-            rel_pattern = f"-[:{relationship_type}]->"
+            rel_pattern = f"-[:{validated_rel_type}]->"
         elif direction == "INCOMING":
-            rel_pattern = f"<-[:{relationship_type}]-"
+            rel_pattern = f"<-[:{validated_rel_type}]-"
         else:  # BOTH
-            rel_pattern = f"-[:{relationship_type}]-"
+            rel_pattern = f"-[:{validated_rel_type}]-"
 
         query = f"""
         MATCH (n)
@@ -325,10 +337,13 @@ class GraphTraversal:
         Returns:
             List of relationship dictionaries
         """
+        # Validate input to prevent Cypher injection
+        validated_rel_type = validate_identifier(relationship_type, "relationship type")
+
         query = f"""
         MATCH (n)
         WHERE elementId(n) = $node_id
-        MATCH (n)-[r:{relationship_type}]-(other)
+        MATCH (n)-[r:{validated_rel_type}]-(other)
         RETURN elementId(r) AS id,
                type(r) AS type,
                elementId(startNode(r)) AS source,
