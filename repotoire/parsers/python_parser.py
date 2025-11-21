@@ -234,6 +234,9 @@ class PythonParser(CodeParser):
         # Extract USES relationships (methods accessing attributes)
         self._extract_attribute_usage(tree, file_path, entity_map, relationships)
 
+        # Extract DECORATES relationships (decorators applied to functions)
+        self._extract_decorates(tree, file_path, entity_map, relationships)
+
         # Create CONTAINS relationships (hierarchical: file→top-level, class→members)
         file_qualified_name = file_path
         for entity in entities:
@@ -450,6 +453,11 @@ class PythonParser(CodeParser):
         if node.returns:
             return_type = ast.unparse(node.returns)
 
+        # Determine decorator flags
+        is_static = "staticmethod" in decorators
+        is_classmethod = "classmethod" in decorators
+        is_property = any(d in decorators for d in ["property", "property.setter", "property.deleter", "property.getter"])
+
         return FunctionEntity(
             name=node.name,
             qualified_name=qualified_name,
@@ -464,6 +472,9 @@ class PythonParser(CodeParser):
             is_async=isinstance(node, ast.AsyncFunctionDef),
             decorators=decorators,
             is_method=class_name is not None,  # Method if defined inside a class
+            is_static=is_static,
+            is_classmethod=is_classmethod,
+            is_property=is_property,
         )
 
     def _extract_nested_functions(
@@ -513,6 +524,11 @@ class PythonParser(CodeParser):
                 # Extract decorators
                 decorators = [self._get_decorator_name(dec) for dec in node.decorator_list]
 
+                # Determine decorator flags
+                is_static = "staticmethod" in decorators
+                is_classmethod = "classmethod" in decorators
+                is_property = any(d in decorators for d in ["property", "property.setter", "property.deleter", "property.getter"])
+
                 nested_func = FunctionEntity(
                     name=node.name,
                     qualified_name=qualified_name,
@@ -527,6 +543,9 @@ class PythonParser(CodeParser):
                     is_async=isinstance(node, ast.AsyncFunctionDef),
                     decorators=decorators,
                     is_method=False,  # Nested functions are not methods
+                    is_static=is_static,
+                    is_classmethod=is_classmethod,
+                    is_property=is_property,
                 )
 
                 nested_entities.append(nested_func)
@@ -1253,3 +1272,104 @@ class PythonParser(CodeParser):
                                     },
                                 )
                             )
+
+    def _extract_decorates(
+        self,
+        tree: ast.AST,
+        file_path: str,
+        entity_map: Dict[str, Entity],
+        relationships: List[Relationship],
+    ) -> None:
+        """Extract DECORATES relationships from decorators to functions.
+
+        Creates relationships from decorator names to the functions they decorate.
+        Handles both built-in decorators (@staticmethod, @classmethod, @property)
+        and custom decorators.
+
+        Args:
+            tree: Python AST
+            file_path: Path to source file
+            entity_map: Map of qualified_name to Entity
+            relationships: List to append relationships to
+        """
+        # Walk through all function definitions (including nested and methods)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # Skip if no decorators
+                if not node.decorator_list:
+                    continue
+
+                # Build the function's qualified name
+                # We need to determine if this is a top-level function, method, or nested function
+                func_name = node.name
+                func_line = node.lineno
+
+                # Try to find this function in entity_map to get its qualified name
+                func_qualified_name = None
+                for qname, entity in entity_map.items():
+                    if isinstance(entity, FunctionEntity):
+                        if entity.name == func_name and entity.line_start == func_line:
+                            func_qualified_name = qname
+                            break
+
+                # If we couldn't find it in entity_map, skip (shouldn't happen)
+                if not func_qualified_name:
+                    continue
+
+                # Process each decorator
+                for decorator in node.decorator_list:
+                    decorator_name = self._resolve_decorator_name(decorator)
+                    if not decorator_name:
+                        continue
+
+                    # Create DECORATES relationship
+                    # Note: The decorator is the source, the function is the target
+                    relationships.append(
+                        Relationship(
+                            source_id=decorator_name,
+                            target_id=func_qualified_name,
+                            rel_type=RelationshipType.DECORATES,
+                            properties={
+                                "line": decorator.lineno,
+                                "decorator_type": type(decorator).__name__,
+                            },
+                        )
+                    )
+
+    def _resolve_decorator_name(self, decorator: ast.expr) -> Optional[str]:
+        """Resolve decorator name from AST node.
+
+        Handles various decorator forms:
+        - Simple names: @decorator
+        - Attribute access: @module.decorator
+        - Function calls: @decorator(args)
+        - Chained attributes: @a.b.c
+
+        Args:
+            decorator: Decorator AST node
+
+        Returns:
+            Decorator name or None if unresolvable
+        """
+        if isinstance(decorator, ast.Name):
+            # Simple decorator: @decorator
+            return decorator.id
+
+        elif isinstance(decorator, ast.Attribute):
+            # Attribute access: @module.decorator or @property.setter
+            # Build full path: module.decorator
+            parts = []
+            node = decorator
+            while isinstance(node, ast.Attribute):
+                parts.insert(0, node.attr)
+                node = node.value
+            if isinstance(node, ast.Name):
+                parts.insert(0, node.id)
+            return ".".join(parts) if parts else None
+
+        elif isinstance(decorator, ast.Call):
+            # Decorator with arguments: @decorator(args)
+            # Recursively get the callable name
+            return self._resolve_decorator_name(decorator.func)
+
+        return None

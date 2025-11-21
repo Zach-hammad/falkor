@@ -248,6 +248,197 @@ class MyClass:
         # Should have File->Class and Class->Function
         assert len(contains_rels) >= 2
 
+    def test_extract_decorator_relationships_staticmethod(self, parser, temp_python_file):
+        """Test DECORATES relationship extraction for @staticmethod."""
+        temp_python_file.write("""
+class MyClass:
+    @staticmethod
+    def static_func():
+        pass
+""")
+        temp_python_file.flush()
+
+        tree = parser.parse(temp_python_file.name)
+        entities = parser.extract_entities(tree, temp_python_file.name)
+        relationships = parser.extract_relationships(tree, temp_python_file.name, entities)
+
+        # Check DECORATES relationship
+        decorates_rels = [r for r in relationships if r.rel_type == RelationshipType.DECORATES]
+        assert len(decorates_rels) == 1
+        assert decorates_rels[0].source_id == "staticmethod"
+        assert "static_func" in decorates_rels[0].target_id
+
+        # Check boolean flag
+        func_entities = [e for e in entities if e.node_type == NodeType.FUNCTION and e.name == "static_func"]
+        assert len(func_entities) == 1
+        assert func_entities[0].is_static is True
+        assert func_entities[0].decorators == ["staticmethod"]
+
+    def test_extract_decorator_relationships_classmethod(self, parser, temp_python_file):
+        """Test DECORATES relationship extraction for @classmethod."""
+        temp_python_file.write("""
+class MyClass:
+    @classmethod
+    def class_func(cls):
+        pass
+""")
+        temp_python_file.flush()
+
+        tree = parser.parse(temp_python_file.name)
+        entities = parser.extract_entities(tree, temp_python_file.name)
+        relationships = parser.extract_relationships(tree, temp_python_file.name, entities)
+
+        # Check DECORATES relationship
+        decorates_rels = [r for r in relationships if r.rel_type == RelationshipType.DECORATES]
+        assert len(decorates_rels) == 1
+        assert decorates_rels[0].source_id == "classmethod"
+        assert "class_func" in decorates_rels[0].target_id
+
+        # Check boolean flag
+        func_entities = [e for e in entities if e.node_type == NodeType.FUNCTION and e.name == "class_func"]
+        assert len(func_entities) == 1
+        assert func_entities[0].is_classmethod is True
+        assert func_entities[0].decorators == ["classmethod"]
+
+    def test_extract_decorator_relationships_property(self, parser, temp_python_file):
+        """Test DECORATES relationship extraction for @property."""
+        temp_python_file.write("""
+class MyClass:
+    @property
+    def my_property(self):
+        return self._value
+""")
+        temp_python_file.flush()
+
+        tree = parser.parse(temp_python_file.name)
+        entities = parser.extract_entities(tree, temp_python_file.name)
+        relationships = parser.extract_relationships(tree, temp_python_file.name, entities)
+
+        # Check DECORATES relationship
+        decorates_rels = [r for r in relationships if r.rel_type == RelationshipType.DECORATES]
+        assert len(decorates_rels) == 1
+        assert decorates_rels[0].source_id == "property"
+        assert "my_property" in decorates_rels[0].target_id
+
+        # Check boolean flag
+        func_entities = [e for e in entities if e.node_type == NodeType.FUNCTION and e.name == "my_property"]
+        assert len(func_entities) == 1
+        assert func_entities[0].is_property is True
+        assert func_entities[0].decorators == ["property"]
+
+    def test_extract_decorator_relationships_custom(self, parser, temp_python_file):
+        """Test DECORATES relationship extraction for custom decorators."""
+        temp_python_file.write("""
+def my_decorator(func):
+    return func
+
+@my_decorator
+def decorated_func():
+    pass
+""")
+        temp_python_file.flush()
+
+        tree = parser.parse(temp_python_file.name)
+        entities = parser.extract_entities(tree, temp_python_file.name)
+        relationships = parser.extract_relationships(tree, temp_python_file.name, entities)
+
+        # Check DECORATES relationship
+        decorates_rels = [r for r in relationships if r.rel_type == RelationshipType.DECORATES]
+        assert len(decorates_rels) == 1
+        assert decorates_rels[0].source_id == "my_decorator"
+        assert "decorated_func" in decorates_rels[0].target_id
+
+        # Check decorator is recorded
+        func_entities = [e for e in entities if e.node_type == NodeType.FUNCTION and e.name == "decorated_func"]
+        assert len(func_entities) == 1
+        assert func_entities[0].decorators == ["my_decorator"]
+
+    def test_extract_decorator_relationships_chained(self, parser, temp_python_file):
+        """Test DECORATES relationship extraction for chained decorators."""
+        temp_python_file.write("""
+def decorator_one(func):
+    return func
+
+def decorator_two(func):
+    return func
+
+@decorator_one
+@decorator_two
+def decorated_func():
+    pass
+""")
+        temp_python_file.flush()
+
+        tree = parser.parse(temp_python_file.name)
+        entities = parser.extract_entities(tree, temp_python_file.name)
+        relationships = parser.extract_relationships(tree, temp_python_file.name, entities)
+
+        # Check DECORATES relationships - should have 2
+        decorates_rels = [r for r in relationships if r.rel_type == RelationshipType.DECORATES]
+        assert len(decorates_rels) == 2
+
+        decorator_names = [r.source_id for r in decorates_rels]
+        assert "decorator_one" in decorator_names
+        assert "decorator_two" in decorator_names
+
+        # All should point to same function
+        assert all("decorated_func" in r.target_id for r in decorates_rels)
+
+        # Check decorators list
+        func_entities = [e for e in entities if e.node_type == NodeType.FUNCTION and e.name == "decorated_func"]
+        assert len(func_entities) == 1
+        assert set(func_entities[0].decorators) == {"decorator_one", "decorator_two"}
+
+    def test_extract_decorator_relationships_with_arguments(self, parser, temp_python_file):
+        """Test DECORATES relationship extraction for decorators with arguments."""
+        temp_python_file.write("""
+def my_decorator(arg):
+    def wrapper(func):
+        return func
+    return wrapper
+
+@my_decorator("test")
+def decorated_func():
+    pass
+""")
+        temp_python_file.flush()
+
+        tree = parser.parse(temp_python_file.name)
+        entities = parser.extract_entities(tree, temp_python_file.name)
+        relationships = parser.extract_relationships(tree, temp_python_file.name, entities)
+
+        # Check DECORATES relationship - should resolve to decorator name
+        decorates_rels = [r for r in relationships if r.rel_type == RelationshipType.DECORATES]
+        assert len(decorates_rels) == 1
+        assert decorates_rels[0].source_id == "my_decorator"
+        assert "decorated_func" in decorates_rels[0].target_id
+
+    def test_extract_decorator_relationships_attribute_access(self, parser, temp_python_file):
+        """Test DECORATES relationship extraction for decorator attribute access."""
+        temp_python_file.write("""
+class MyClass:
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, val):
+        self._value = val
+""")
+        temp_python_file.flush()
+
+        tree = parser.parse(temp_python_file.name)
+        entities = parser.extract_entities(tree, temp_python_file.name)
+        relationships = parser.extract_relationships(tree, temp_python_file.name, entities)
+
+        # Check DECORATES relationships - should have 2 (property and setter)
+        decorates_rels = [r for r in relationships if r.rel_type == RelationshipType.DECORATES]
+        assert len(decorates_rels) == 2
+
+        decorator_names = [r.source_id for r in decorates_rels]
+        assert "property" in decorator_names
+        assert "value.setter" in decorator_names
+
 
 class TestEdgeCases:
     """Test edge cases and error handling."""
