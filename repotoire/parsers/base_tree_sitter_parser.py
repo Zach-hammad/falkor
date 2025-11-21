@@ -16,6 +16,7 @@ from repotoire.models import (
     FileEntity,
     ClassEntity,
     FunctionEntity,
+    AttributeEntity,
     Relationship,
     RelationshipType,
 )
