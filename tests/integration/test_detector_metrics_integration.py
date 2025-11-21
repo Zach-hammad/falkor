@@ -4,6 +4,7 @@ Tests verify that detector findings correctly feed into metrics calculation
 and health scoring.
 """
 
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -59,13 +60,11 @@ def func_b():
         pipeline = IngestionPipeline(str(temp_path), test_neo4j_client)
         pipeline.ingest(patterns=["**/*.py"])
 
-        engine = AnalysisEngine(test_neo4j_client)
+        engine = AnalysisEngine(test_neo4j_client, repository_path=str(temp_path))
         health = engine.analyze()
 
         # Cleanup
-        for file in temp_path.glob("*.py"):
-            file.unlink()
-        temp_path.rmdir()
+        shutil.rmtree(temp_path)
 
         # Verify metrics reflect circular dependency
         assert health.metrics.circular_dependencies >= 0
@@ -93,13 +92,11 @@ def func_b():
         pipeline = IngestionPipeline(str(temp_path), test_neo4j_client)
         pipeline.ingest(patterns=["**/*.py"])
 
-        engine = AnalysisEngine(test_neo4j_client)
+        engine = AnalysisEngine(test_neo4j_client, repository_path=str(temp_path))
         health = engine.analyze()
 
         # Cleanup
-        for file in temp_path.glob("*.py"):
-            file.unlink()
-        temp_path.rmdir()
+        shutil.rmtree(temp_path)
 
         # Structure score should be affected by cycles
         # The penalty is: min(50, circular_dependencies * 10)
@@ -140,13 +137,11 @@ if __name__ == '__main__':
         pipeline = IngestionPipeline(str(temp_path), test_neo4j_client)
         pipeline.ingest(patterns=["**/*.py"])
 
-        engine = AnalysisEngine(test_neo4j_client)
+        engine = AnalysisEngine(test_neo4j_client, repository_path=str(temp_path))
         health = engine.analyze()
 
         # Cleanup
-        for file in temp_path.glob("*.py"):
-            file.unlink()
-        temp_path.rmdir()
+        shutil.rmtree(temp_path)
 
         # Verify dead code metrics
         dead_code_findings = [
@@ -188,13 +183,11 @@ if __name__ == '__main__':
         pipeline = IngestionPipeline(str(temp_path), test_neo4j_client)
         pipeline.ingest(patterns=["**/*.py"])
 
-        engine = AnalysisEngine(test_neo4j_client)
+        engine = AnalysisEngine(test_neo4j_client, repository_path=str(temp_path))
         health = engine.analyze()
 
         # Cleanup
-        for file in temp_path.glob("*.py"):
-            file.unlink()
-        temp_path.rmdir()
+        shutil.rmtree(temp_path)
 
         # Quality score calculation: dead_code_score = 100 - (dead_code_percentage * 100)
         if health.metrics.dead_code_percentage > 0:
@@ -240,13 +233,15 @@ class GodClass:
         pipeline = IngestionPipeline(str(temp_path), test_neo4j_client)
         pipeline.ingest(patterns=["**/*.py"])
 
-        engine = AnalysisEngine(test_neo4j_client)
+        # Use lower thresholds for test - 15 methods should qualify
+        detector_config = {
+            "god_class_high_method_count": 15  # Lower threshold for test
+        }
+        engine = AnalysisEngine(test_neo4j_client, detector_config=detector_config, repository_path=str(temp_path))
         health = engine.analyze()
 
         # Cleanup
-        for file in temp_path.glob("*.py"):
-            file.unlink()
-        temp_path.rmdir()
+        shutil.rmtree(temp_path)
 
         # Verify god class metrics
         god_class_findings = [
@@ -278,13 +273,11 @@ class GodClass{i}:
         pipeline = IngestionPipeline(str(temp_path), test_neo4j_client)
         pipeline.ingest(patterns=["**/*.py"])
 
-        engine = AnalysisEngine(test_neo4j_client)
+        engine = AnalysisEngine(test_neo4j_client, repository_path=str(temp_path))
         health = engine.analyze()
 
         # Cleanup
-        for file in temp_path.glob("*.py"):
-            file.unlink()
-        temp_path.rmdir()
+        shutil.rmtree(temp_path)
 
         # Quality score calculation: god_class_penalty = min(40, god_class_count * 15)
         if health.metrics.god_class_count > 0:
@@ -330,13 +323,11 @@ if __name__ == '__main__':
         pipeline = IngestionPipeline(str(temp_path), test_neo4j_client)
         pipeline.ingest(patterns=["**/*.py"])
 
-        engine = AnalysisEngine(test_neo4j_client)
+        engine = AnalysisEngine(test_neo4j_client, repository_path=str(temp_path))
         health = engine.analyze()
 
         # Cleanup
-        for file in temp_path.glob("*.py"):
-            file.unlink()
-        temp_path.rmdir()
+        shutil.rmtree(temp_path)
 
         # Verify summary matches actual findings
         critical_count = len([f for f in health.findings if f.severity == Severity.CRITICAL])
@@ -363,10 +354,10 @@ if __name__ == '__main__':
         pipeline = IngestionPipeline(temp_dir, test_neo4j_client)
         pipeline.ingest(patterns=["**/*.py"])
 
-        engine = AnalysisEngine(test_neo4j_client)
+        engine = AnalysisEngine(test_neo4j_client, repository_path=temp_dir)
         health = engine.analyze()
 
-        Path(temp_dir).rmdir()
+        shutil.rmtree(temp_dir)
 
         # Should have no findings
         assert health.findings_summary.total == 0
@@ -410,13 +401,11 @@ if __name__ == '__main__':
         pipeline = IngestionPipeline(str(temp_path), test_neo4j_client)
         pipeline.ingest(patterns=["**/*.py"])
 
-        engine = AnalysisEngine(test_neo4j_client)
+        engine = AnalysisEngine(test_neo4j_client, repository_path=str(temp_path))
         health = engine.analyze()
 
         # Cleanup
-        for file in temp_path.glob("*.py"):
-            file.unlink()
-        temp_path.rmdir()
+        shutil.rmtree(temp_path)
 
         # Clean code should score well
         assert health.overall_score >= 70
@@ -450,13 +439,11 @@ def dead5(): pass
         pipeline = IngestionPipeline(str(temp_path), test_neo4j_client)
         pipeline.ingest(patterns=["**/*.py"])
 
-        engine = AnalysisEngine(test_neo4j_client)
+        engine = AnalysisEngine(test_neo4j_client, repository_path=str(temp_path))
         health = engine.analyze()
 
         # Cleanup
-        for file in temp_path.glob("*.py"):
-            file.unlink()
-        temp_path.rmdir()
+        shutil.rmtree(temp_path)
 
         # Should have multiple findings
         assert health.findings_summary.total > 0
@@ -482,13 +469,11 @@ class TestClass:
         pipeline = IngestionPipeline(str(temp_path), test_neo4j_client)
         pipeline.ingest(patterns=["**/*.py"])
 
-        engine = AnalysisEngine(test_neo4j_client)
+        engine = AnalysisEngine(test_neo4j_client, repository_path=str(temp_path))
         health = engine.analyze()
 
         # Cleanup
-        for file in temp_path.glob("*.py"):
-            file.unlink()
-        temp_path.rmdir()
+        shutil.rmtree(temp_path)
 
         # Calculate expected weighted average
         expected = (
@@ -513,13 +498,11 @@ class TestClass:
         pipeline = IngestionPipeline(str(temp_path), test_neo4j_client)
         pipeline.ingest(patterns=["**/*.py"])
 
-        engine = AnalysisEngine(test_neo4j_client)
+        engine = AnalysisEngine(test_neo4j_client, repository_path=str(temp_path))
         health = engine.analyze()
 
         # Cleanup
-        for file in temp_path.glob("*.py"):
-            file.unlink()
-        temp_path.rmdir()
+        shutil.rmtree(temp_path)
 
         # Verify grade matches score
         score = health.overall_score
@@ -567,13 +550,11 @@ if __name__ == '__main__':
         pipeline = IngestionPipeline(str(temp_path), test_neo4j_client)
         pipeline.ingest(patterns=["**/*.py"])
 
-        engine = AnalysisEngine(test_neo4j_client)
+        engine = AnalysisEngine(test_neo4j_client, repository_path=str(temp_path))
         health = engine.analyze()
 
         # Cleanup
-        for file in temp_path.glob("*.py"):
-            file.unlink()
-        temp_path.rmdir()
+        shutil.rmtree(temp_path)
 
         # Count findings by detector
         circular_findings = len([f for f in health.findings if f.detector == "CircularDependencyDetector"])
@@ -611,16 +592,14 @@ def unused(): pass
         pipeline = IngestionPipeline(str(temp_path), test_neo4j_client)
         pipeline.ingest(patterns=["**/*.py"])
 
-        engine = AnalysisEngine(test_neo4j_client)
+        engine = AnalysisEngine(test_neo4j_client, repository_path=str(temp_path))
 
         # Run analysis twice
         health1 = engine.analyze()
         health2 = engine.analyze()
 
         # Cleanup
-        for file in temp_path.glob("*.py"):
-            file.unlink()
-        temp_path.rmdir()
+        shutil.rmtree(temp_path)
 
         # Metrics should be identical
         assert health1.metrics.total_files == health2.metrics.total_files

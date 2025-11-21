@@ -61,8 +61,7 @@ class GodClassDetector(CodeSmellDetector):
         query = """
         MATCH (file:File)-[:CONTAINS]->(c:Class)
         WITH c, file
-        MATCH (file)-[:CONTAINS]->(m:Function)
-        WHERE m.qualifiedName STARTS WITH c.qualifiedName + '.'
+        OPTIONAL MATCH (c)-[:CONTAINS]->(m:Function)
         WITH c, file,
              collect(m) AS methods,
              sum(m.complexity) AS total_complexity,
