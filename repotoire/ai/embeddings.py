@@ -95,8 +95,8 @@ class CodeEmbedder:
         # Convert entities to text representations
         texts = [self._entity_to_text(entity) for entity in entities]
 
-        # Batch embed using neo4j-graphrag
-        embeddings = self.embeddings.embed_documents(texts)
+        # Embed each text (neo4j-graphrag doesn't have batch embed method)
+        embeddings = [self.embeddings.embed_query(text) for text in texts]
 
         logger.info(f"Generated embeddings for {len(entities)} entities")
 
