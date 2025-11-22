@@ -260,8 +260,22 @@ if __name__ == "__main__":
                     # Convert file path to module path
                     module = rel_path.replace("/", ".").replace(".py", "")
                 else:
-                    # Fallback: just use the filename
-                    module = module_path.split("/")[-1].replace(".py", "")
+                    # Fallback: Find package root in path
+                    # Look for common package indicators (repotoire, src, etc.)
+                    path_parts = module_path.split("/")
+
+                    # Try to find the package root by looking for project name in path
+                    package_name = Path(repository_path).name  # e.g., "repotoire"
+
+                    if package_name in path_parts:
+                        # Find index of package name and take everything after
+                        pkg_index = path_parts.index(package_name)
+                        rel_parts = path_parts[pkg_index:]
+                        module = ".".join(rel_parts).replace(".py", "")
+                    else:
+                        # Last resort: just use the filename (will likely fail)
+                        logger.warning(f"Could not determine module path for {module_path}, using filename only")
+                        module = module_path.split("/")[-1].replace(".py", "")
 
                 # Determine what to import based on pattern type
                 is_method = isinstance(pattern, FunctionPattern) and pattern.is_method
